@@ -27,14 +27,37 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from importlib import util as importlib_util
 from pathlib import Path
+from types import ModuleType
 
 HERE = Path(__file__).resolve().parent
+RENDERER = HERE / "render-report.py"
 
-_spec = importlib_util.spec_from_file_location("render_report", HERE / "render-report.py")
-rr = importlib_util.module_from_spec(_spec)
-_spec.loader.exec_module(rr)
+_renderer = None
+_renderer_mtime = None
+_renderer_lock = threading.Lock()
+
+
+def rr():
+    """The renderer module, re-executed when its file changes.
+
+    Importing once at startup meant editing the renderer mid-session did nothing
+    while CSS hot-reloaded on every request, which is a confusing pair of rules to
+    hold in your head when you are iterating on the tool itself.
+    """
+    global _renderer, _renderer_mtime
+    source = RENDERER.read_text(encoding="utf-8")
+    stamp = (RENDERER.stat().st_mtime_ns, hash(source))
+    with _renderer_lock:
+        if _renderer is None or stamp != _renderer_mtime:
+            # Compiled here rather than via exec_module: Python invalidates its bytecode
+            # cache on source mtime plus size, so two same-length edits inside one second
+            # load a stale .pyc.
+            module = ModuleType("render_report")
+            module.__file__ = str(RENDERER)
+            exec(compile(source, str(RENDERER), "exec"), module.__dict__)
+            _renderer, _renderer_mtime = module, stamp
+    return _renderer
 
 # accept and drop resolve an open flag; the rest steer the walk without changing state.
 RESOLVE = {"accept": "accepted", "drop": "dropped"}
@@ -63,7 +86,7 @@ class Session:
         )
 
     def load(self):
-        return rr.load(self.root, self.css_path)
+        return rr().load(self.root, self.css_path)
 
     def fingerprint(self):
         stamps = sorted(
@@ -220,12 +243,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.stream_events()
             if route == "/":
                 session, beats, css, problems, _ = self.session.load()
-                page = rr.SHELL + rr.render(session, beats, css, problems, live=True)
+                render = rr()
+                page = render.SHELL + render.render(session, beats, css, problems, live=True)
                 return self.send(200, page, "text/html")
             if route == "/fragment":
                 session, beats, _css, problems, _ = self.session.load()
                 return self.send(
-                    200, rr.body_html(session, beats, problems, True), "text/html"
+                    200, rr().body_html(session, beats, problems, True), "text/html"
                 )
             if route == "/state":
                 _s, beats, _c, _p, problems = self.session.load()
@@ -278,7 +302,7 @@ def main():
     if not (root / "session.json").exists():
         sys.exit(f"serve: no session.json in {root}")
 
-    css_path = Path(args.css).expanduser() if args.css else rr.default_css()
+    css_path = Path(args.css).expanduser() if args.css else rr().default_css()
     Handler.session = Session(root, css_path)
     threading.Thread(target=Handler.session.watch, daemon=True).start()
 

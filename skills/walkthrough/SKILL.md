@@ -17,6 +17,11 @@ The scripts live beside this file. Call them from the directory this SKILL.md wa
 from, never from the repo under review. Below, `$S` is that directory and `$R` is the
 session directory from **Session state**.
 
+When you are working on this tool itself, point `$S` at your checkout instead. The
+installed plugin lags whatever you just committed until it is reinstalled, and running a
+walk against a stale copy is how you spend a session debugging a bug you already fixed.
+Say which one you are using when it is not the installed one.
+
 ## The five rules
 
 Non-negotiable. Everything else here is guidance.
@@ -204,10 +209,23 @@ terminal accepts the same answers in words, so a closed browser never strands th
 
 **Resolving a flag.** The reviewer accepts or drops it in the same beat, from the page or
 in words. The server has already flipped the beat's `state` and recorded their words as
-`call`, so do not rewrite either. On accept, in `branch` mode: create the fixes branch if
-it does not exist yet (lazily, at the first accept, off the recorded head, following the
-target repo's branch convention), apply the patch, run the repo's verification, and
-commit. One commit per accepted flag, conventional subject, the `FIX` line as the body.
+`call`, so do not rewrite either.
+
+On accept, in `branch` mode, where the fix goes depends on whether the PR can still take
+it:
+
+| the target | where the commit goes |
+| --- | --- |
+| an open PR, and you are already on its branch | onto that branch, directly |
+| an open PR, and you are not on its branch | check it out first, then onto it |
+| merged, or no PR at all | a fixes branch created lazily at the first accept, off the recorded head, following the target repo's branch convention |
+
+A finding about code in an open PR belongs in that PR. Opening a sibling branch beside a
+PR that is still taking commits splits the change in two and leaves the reviewer to
+reconcile them.
+
+Then apply the patch, run the repo's verification, and commit. One commit per accepted
+flag, conventional subject, the `FIX` line as the body.
 
 **Write the result back into the beat**, `landed` set to the short SHA and `branch` to the
 branch, so the page shows what shipped instead of going quiet. Add the matching `lands[]`
