@@ -1,0 +1,17 @@
+version: 2
+
+updates:
+  # Dependabot raises no security alerts for SHA-pinned actions, only for
+  # semver ones, so this schedule is the sole mechanism that carries an
+  # upstream fix in. Weekly, not monthly, for that reason. The trailing
+  # "# vX.Y.Z" beside each pin is updated along with the SHA.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns:
+          - "*"
