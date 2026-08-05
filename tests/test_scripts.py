@@ -150,14 +150,16 @@ class ReportOrdering(unittest.TestCase):
         self.assertNotIn("Dropped", html)
 
     def test_flags_open_expanded_and_clean_beats_collapsed(self):
+        # Matched loosely on purpose: attributes get added to these elements as
+        # the page grows, and that must not read as a behavior change.
         flag = self.render([beat(n=1, state="flag", slots={"what": "x", "risk": "r", "fix": "f"})])
         clean = self.render([beat(n=1, state="clean")])
-        self.assertIn("<details class=\"beat s-flag\" open>", flag)
-        self.assertIn("<details class=\"beat s-clean\">", clean)
+        self.assertRegex(flag, r'<details class="beat s-flag"[^>]*\sopen[\s>]')
+        self.assertNotRegex(clean, r'<details class="beat s-clean"[^>]*\sopen[\s>]')
 
     def test_unverified_beats_count_as_clean_in_the_tiles(self):
         html = self.render([beat(n=1, state="clean"), beat(n=2, state="unverified")])
-        self.assertIn('<div class="count is-clean"><span class="n">2</span>', html)
+        self.assertRegex(html, r'<div class="count is-clean"[^>]*>\s*<span class="n">2</span>')
 
     def test_a_failing_beat_carries_the_unproven_chip(self):
         html = rr.render({"repo": "r"}, [beat(n=1)], "", {1: ["beat 1: no what"]})
