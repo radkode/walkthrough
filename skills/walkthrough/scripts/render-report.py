@@ -42,8 +42,9 @@ SECTIONS = (
 
 LANDS_TAG = {"landed": "Landed", "ready": "Ready", "open": "Your call"}
 
-# proof has to point at something a reader can re-run or open
-PROOF_EVIDENCE = re.compile(r"`[^`]+`|\b[\w./-]+\.\w+:\d+")
+# proof has to point at something a reader can re-run or open, or say up front
+# that it does not. "inferred" is the documented honest answer, not a failure.
+PROOF_EVIDENCE = re.compile(r"`[^`]+`|\b[\w./-]+\.\w+:\d+|^inferred\b")
 
 
 def md(text):
