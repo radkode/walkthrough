@@ -12,6 +12,17 @@ updates:
     commit-message:
       prefix: ci
     groups:
+      # Majors land in their own PR, so a breaking bump never arrives wearing
+      # a routine title. Deliberately not ignored: if a fix ships only in a
+      # new major, ignoring majors would reopen the hole the pinning closed.
+      actions-major:
+        patterns:
+          - "*"
+        update-types:
+          - major
       actions:
         patterns:
           - "*"
+        update-types:
+          - minor
+          - patch
