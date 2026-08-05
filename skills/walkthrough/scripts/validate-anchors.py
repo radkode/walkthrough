@@ -128,15 +128,19 @@ def main():
     try:
         if args.pr:
             diff = subprocess.run(
-                ["gh", "pr", "diff", args.pr], capture_output=True, text=True, check=True
+                ["gh", "pr", "diff", args.pr],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=True,
             ).stdout
         elif args.diff == "-":
-            diff = sys.stdin.read()
+            diff = sys.stdin.buffer.read().decode("utf-8")
         else:
-            with open(args.diff) as fh:
+            with open(args.diff, encoding="utf-8") as fh:
                 diff = fh.read()
 
-        with open(args.payload) as fh:
+        with open(args.payload, encoding="utf-8") as fh:
             payload = json.load(fh)
     except (OSError, json.JSONDecodeError, subprocess.CalledProcessError) as e:
         sys.exit("validate-anchors: %s" % e)
@@ -145,7 +149,7 @@ def main():
     out = json.dumps(payload, indent=2)
 
     if args.out:
-        with open(args.out, "w") as fh:
+        with open(args.out, "w", encoding="utf-8") as fh:
             fh.write(out + "\n")
     else:
         print(out)

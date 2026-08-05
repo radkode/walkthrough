@@ -1,8 +1,8 @@
 ---
 name: walkthrough
 description: Interactive PR review, one beat at a time. Reconstructs what a change is for and how it fits the project, walks it in causal order while the reviewer steers, resolves each flag at the moment it is raised, and lands the accepted ones as commits or a GitHub review, whichever has a reader. Use for reviewing a PR or an unfamiliar diff, especially AI-authored changes where no author is around to answer questions.
-user-invocable: true
-argument-description: PR number, branch name, or nothing (walks the current diff)
+disable-model-invocation: true
+argument-hint: [pr-number | branch]
 ---
 
 # Walkthrough
@@ -197,7 +197,8 @@ $S/scripts/render-report.py $R
 
 Exit 2 means it rendered but a beat failed validation and carries an `UNPROVEN` chip. Fix
 the beat file and re-render; do not ship an unproven page. Publish with the `Artifact`
-tool, and if that tool is unavailable, report the local `$R/report.html` path instead.
+tool. If that tool is unavailable, re-render with `--standalone` so the file opens
+correctly in a browser, and report the local `$R/report.html` path instead.
 
 **Branch mode.** The commits already exist from Phase 3. Report the branch and
 `git log --oneline`, and offer to push and open a PR. Do not do either unasked. A session
