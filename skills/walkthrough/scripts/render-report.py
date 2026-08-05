@@ -60,13 +60,24 @@ SHELL = (
 # it moves, preserving which beats the reviewer had expanded. Decisions POST back.
 LIVE_JS = """<script>
 (() => {
-  const dot = document.getElementById('live');
+  const live = document.getElementById('live');
   const body = document.getElementById('live-body');
-  let rev = null, misses = 0, known = new Set();
+  let rev = null, known = new Set(), parked = false, sending = false;
 
-  const setDot = (cls, text) => { dot.className = 'live ' + cls; dot.textContent = text; };
   const beatIds = () => new Set([...document.querySelectorAll('.beat')].map(d => d.dataset.n));
   const openIds = () => new Set([...document.querySelectorAll('.beat[open]')].map(d => d.dataset.n));
+
+  // Controls are live only while the agent is parked. Acting mid-commit races it.
+  function applyStatus(status) {
+    const phase = status.phase || 'working';
+    parked = phase === 'parked';
+    live.className = 'live ' + phase;
+    live.textContent = status.text || phase;
+    if (!sending) enable(parked);
+  }
+
+  const enable = on => document.querySelectorAll('.act, .note')
+    .forEach(el => el.disabled = !on);
 
   async function swap() {
     const open = openIds();
@@ -77,29 +88,19 @@ LIVE_JS = """<script>
     });
     known = beatIds();
     wire();
+    enable(parked);
   }
 
-  async function poll() {
-    try {
-      const state = await fetch('./state').then(r => r.json());
-      misses = 0;
-      setDot('ok', 'live');
-      if (rev !== null && state.rev !== rev) await swap();
-      rev = state.rev;
-    } catch {
-      if (++misses > 2) setDot('down', 'reconnecting');
-    }
-  }
-
-  async function decide(button) {
+  async function act(button) {
     const row = button.closest('.acts');
     const n = row.dataset.acts;
     const note = row.querySelector('.note');
     const msg = row.querySelector('.act-msg');
-    row.querySelectorAll('button, input').forEach(el => el.disabled = true);
-    msg.textContent = 'saving';
+    sending = true;
+    enable(false);
+    msg.textContent = 'sending';
     try {
-      const sent = await fetch('./decide', {
+      const sent = await fetch('./act', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -109,19 +110,32 @@ LIVE_JS = """<script>
         }),
       });
       if (!sent.ok) throw new Error((await sent.text()).trim() || sent.status);
-      await poll();
+      msg.textContent = '';
     } catch (err) {
-      msg.textContent = 'not saved, ' + err.message;
-      row.querySelectorAll('button, input').forEach(el => el.disabled = false);
+      msg.textContent = 'not sent, ' + err.message;
+      enable(true);
     }
+    sending = false;
   }
 
-  const wire = () => document.querySelectorAll('.act').forEach(b => b.onclick = () => decide(b));
+  const wire = () => document.querySelectorAll('.act').forEach(b => b.onclick = () => act(b));
+
+  const stream = new EventSource('./events');
+  stream.onmessage = event => {
+    const state = JSON.parse(event.data);
+    applyStatus(state.status || {});
+    if (rev !== null && state.rev !== rev) swap();
+    rev = state.rev;
+  };
+  stream.onerror = () => {
+    live.className = 'live down';
+    live.textContent = 'reconnecting';
+    enable(false);
+  };
 
   known = beatIds();
   wire();
-  poll();
-  setInterval(poll, 1500);
+  enable(false);
 })();
 </script>"""
 
@@ -189,15 +203,27 @@ def beat_html(beat, problems, expanded, live=False):
             '<div class="call"><span class="lbl">Your call · beat '
             f'{n}</span><q>{md(beat["call"])}</q></div>'
         )
-    if live and beat.get("state") == "flag":
+    if beat.get("landed"):
+        branch = beat.get("branch")
         body.append(
-            f'<div class="acts" data-acts="{n}">'
-            f'<button class="act primary" data-action="accept">Accept</button>'
-            f'<button class="act" data-action="drop">Drop</button>'
-            f'<input class="note" aria-label="your words, beat {n}" '
-            f'placeholder="or put it in your own words">'
-            f'<span class="act-msg"></span>'
-            f"</div>"
+            '<div class="shipped"><span class="lbl">Landed</span>'
+            f'<code>{md(beat["landed"])}</code>'
+            + (f"<span>on</span><code>{md(branch)}</code>" if branch else "")
+            + "</div>"
+        )
+    if live:
+        flag = beat.get("state") == "flag"
+        controls = (
+            '<button class="act primary" data-action="accept">Accept</button>'
+            '<button class="act" data-action="drop">Drop</button>'
+            if flag
+            else '<button class="act" data-action="note">Save note</button>'
+        )
+        placeholder = "or put it in your own words" if flag else "note this for the record"
+        body.append(
+            f'<div class="acts" data-acts="{n}">{controls}'
+            f'<input class="note" aria-label="your words, beat {n}" placeholder="{placeholder}">'
+            f'<span class="act-msg"></span></div>'
         )
 
     return (
@@ -282,7 +308,7 @@ def render(session, beats, css, problems_by_n, live=False):
     if session.get("date"):
         parts.append(f'<span class="sep">·</span><span>{md(session["date"])}</span>')
     if live:
-        parts.append('<span id="live" class="live ok">live</span>')
+        parts.append('<span id="live" class="live starting">connecting</span>')
     parts.append(
         f'</div><h1><span class="num">{html.escape(label)}</span> '
         f'{md(session.get("title", ""))}</h1>'

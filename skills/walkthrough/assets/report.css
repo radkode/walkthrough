@@ -435,11 +435,15 @@ h1 .num { color: var(--ink-3); font-variant-numeric: tabular-nums; }
 
 /* ---- live session, only rendered by serve.py ---- */
 
+/* What the agent is doing right now. Working and parked look identical on disk,
+   and telling them apart is the whole reason this line exists. */
 .live {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  color: var(--clean);
+  color: var(--ink-2);
+  text-transform: none;
+  letter-spacing: 0.04em;
 }
 .live::before {
   content: "";
@@ -447,8 +451,42 @@ h1 .num { color: var(--ink-3); font-variant-numeric: tabular-nums; }
   height: 6px;
   border-radius: 50%;
   background: currentColor;
+  flex: none;
 }
+.live.parked { color: var(--clean); }
 .live.down { color: var(--flag); }
+.live.working::before,
+.live.starting::before { animation: breathe 1.6s ease-in-out infinite; }
+
+@keyframes breathe {
+  50% { opacity: 0.25; }
+}
+
+/* Named .shipped, not .landed: .next-row.landed already exists in What lands,
+   and a bare .landed rule silently overrode that section's grid. */
+.shipped {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  background: var(--clean-bg);
+  padding: 9px 14px;
+  border-radius: 3px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+.shipped .lbl {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--clean);
+}
+.shipped code {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink);
+}
 
 .acts {
   display: flex;

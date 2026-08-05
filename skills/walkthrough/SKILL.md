@@ -139,8 +139,21 @@ and give the reviewer the URL it prints:
 $S/scripts/serve.py $R
 ```
 
-The page streams beats as you write them and carries the controls: Accept and Drop on an
-open flag, Next beat anywhere. It also writes its URL to `$R/serve.json`.
+The page streams beats over SSE as you write them and carries the controls: Accept and
+Drop on an open flag, Save note on any beat, Next beat anywhere. It writes its URL to
+`$R/serve.json`.
+
+**Say what you are doing.** The page cannot see you work, and "busy" and "waiting on you"
+look identical on disk, so the controls stay disabled until you say you are parked. POST
+before and after anything slow:
+
+```bash
+curl -s -X POST $URL/status -H 'Content-Type: application/json' \
+  -d '{"phase":"working","text":"running the repo verification","beat":2}'
+```
+
+`phase` is `working`, `parked`, or `done`. Post `parked` immediately before you block, and
+`working` again the moment you pick an action up.
 
 A beat is a coherent unit of change, usually not one file. A service plus its test plus
 the type it added is one beat. A 600-line file with two unrelated changes is two.
@@ -184,10 +197,10 @@ the reviewer acts:
 curl -s "$(python3 -c "import json;print(json.load(open('$R/serve.json'))['url'])")/await?after=<seq>"
 ```
 
-`<seq>` is the seq of the last decision you acted on, starting at 0. The reply is the
-decision: `{seq, n, action, note}` where action is `accept`, `drop`, or `next`. A reply of
-`{"timeout": true}` means nobody acted; say so and park again. The terminal accepts the
-same answers in words, so a closed browser never strands the walk.
+`<seq>` is the seq of the last action you handled, starting at 0. The reply is
+`{seq, n, action, note}` where action is `accept`, `drop`, `note`, `next`, `back`, or
+`skip`. A reply of `{"timeout": true}` means nobody acted; say so and park again. The
+terminal accepts the same answers in words, so a closed browser never strands the walk.
 
 **Resolving a flag.** The reviewer accepts or drops it in the same beat, from the page or
 in words. The server has already flipped the beat's `state` and recorded their words as
@@ -195,7 +208,10 @@ in words. The server has already flipped the beat's `state` and recorded their w
 it does not exist yet (lazily, at the first accept, off the recorded head, following the
 target repo's branch convention), apply the patch, run the repo's verification, and
 commit. One commit per accepted flag, conventional subject, the `FIX` line as the body.
-Confirm in one line and advance:
+
+**Write the result back into the beat**, `landed` set to the short SHA and `branch` to the
+branch, so the page shows what shipped instead of going quiet. Add the matching `lands[]`
+entry to `session.json`. Then confirm in one line and advance:
 
 ```
 landed · fix/pin-attw · 961eb58

@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """
-Serve a walkthrough session so the page drives the walk.
+Serve a walkthrough session so the page and the walk stay in step, both ways.
 
-Binds loopback on an ephemeral port and writes the URL to <session-dir>/serve.json.
-The page polls /state, swaps in /fragment when the fingerprint moves, and POSTs
-decisions to /decide. /await blocks until the next decision, which is how the
-terminal side waits on a click without spinning.
+Page to agent: POST /act carries the reviewer's action, and the agent parks on
+/await until one arrives.
 
-Loopback only, and no path is ever taken from the request: every read and write is
+Agent to page: POST /status carries what the agent is doing right now, which is
+the half that files alone cannot express. "Applying your accept", "running
+tests", "parked waiting on you" all look identical on disk.
+
+Both directions land on /events, a Server-Sent Events stream, so the page never
+polls. A watcher thread covers writes nobody announced.
+
+Loopback only, and no path is ever taken from a request: every read and write is
 a fixed name inside the session directory.
 
 Exit 1  usage error, or the port could not be bound
@@ -15,10 +20,12 @@ Exit 1  usage error, or the port could not be bound
 import argparse
 import json
 import os
+import queue
 import re
 import signal
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import util as importlib_util
 from pathlib import Path
@@ -29,44 +36,89 @@ _spec = importlib_util.spec_from_file_location("render_report", HERE / "render-r
 rr = importlib_util.module_from_spec(_spec)
 _spec.loader.exec_module(rr)
 
-# accept and drop resolve an open flag; next only advances the walk.
+# accept and drop resolve an open flag; the rest steer the walk without changing state.
 RESOLVE = {"accept": "accepted", "drop": "dropped"}
-ACTIONS = (*RESOLVE, "next")
+ACTIONS = (*RESOLVE, "next", "note", "back", "skip")
 MAX_BODY = 64 * 1024
 AWAIT_TIMEOUT = 900.0
+HEARTBEAT = 20.0
+WATCH_INTERVAL = 0.5
 
 
 class Session:
-    """Session state plus the condition the awaiters park on."""
+    """Session state, the pub/sub fanout, and the condition awaiters park on."""
 
     def __init__(self, root, css_path):
         self.root = root
         self.css_path = css_path
         self.decisions = root / "decisions.jsonl"
         self.cond = threading.Condition()
-        self.seq = sum(1 for _ in self.decisions.open(encoding="utf-8")) if self.decisions.exists() else 0
+        self.lock = threading.Lock()
+        self.subscribers = []
+        self.status = {"phase": "starting", "text": "waiting for the walk to begin"}
+        self.seq = (
+            sum(1 for _ in self.decisions.open(encoding="utf-8"))
+            if self.decisions.exists()
+            else 0
+        )
 
     def load(self):
         return rr.load(self.root, self.css_path)
 
     def fingerprint(self):
-        """Cheap change signal: which beats exist, their mtimes, and the decision count."""
         stamps = sorted(
             (p.name, p.stat().st_mtime_ns) for p in (self.root / "beats").glob("*.json")
         )
-        return f"{self.seq}:{hash(tuple(stamps))}"
+        session = (self.root / "session.json").stat().st_mtime_ns
+        return f"{self.seq}:{session}:{hash(tuple(stamps))}"
 
-    def decide(self, n, action, note):
-        """Flip a beat to its resolved state and record the reviewer's words."""
-        if action in RESOLVE:
+    # ---- pub/sub -------------------------------------------------------
+
+    def snapshot(self):
+        return {"rev": self.fingerprint(), "seq": self.seq, "status": self.status}
+
+    def subscribe(self):
+        channel = queue.Queue()
+        with self.lock:
+            self.subscribers.append(channel)
+        return channel
+
+    def unsubscribe(self, channel):
+        with self.lock:
+            if channel in self.subscribers:
+                self.subscribers.remove(channel)
+
+    def publish(self):
+        event = self.snapshot()
+        with self.lock:
+            listeners = list(self.subscribers)
+        for channel in listeners:
+            channel.put(event)
+
+    def set_status(self, status):
+        self.status = {
+            "phase": (status.get("phase") or "working").strip(),
+            "text": (status.get("text") or "").strip(),
+        }
+        for key in ("beat", "sha"):
+            if status.get(key) is not None:
+                self.status[key] = status[key]
+        self.publish()
+        return self.status
+
+    # ---- actions -------------------------------------------------------
+
+    def act(self, n, action, note):
+        """Apply a reviewer action. Only accept and drop change a beat's state."""
+        if action in RESOLVE or (action == "note" and n is not None):
             path = self.root / "beats" / f"{n:02d}.json"
             if not path.exists():
                 raise ValueError(f"no beat {n}")
             beat = json.loads(path.read_text(encoding="utf-8"))
-            if beat.get("state") != "flag":
-                raise ValueError(f"beat {n} is {beat.get('state')}, not an open flag")
-
-            beat["state"] = RESOLVE[action]
+            if action in RESOLVE:
+                if beat.get("state") != "flag":
+                    raise ValueError(f"beat {n} is {beat.get('state')}, not an open flag")
+                beat["state"] = RESOLVE[action]
             if note:
                 beat["call"] = note
             path.write_text(json.dumps(beat, indent=2) + "\n", encoding="utf-8")
@@ -77,10 +129,11 @@ class Session:
             with self.decisions.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(record) + "\n")
             self.cond.notify_all()
+        self.set_status({"phase": "working", "text": f"picking up your {action}"})
         return record
 
     def wait(self, after, timeout):
-        """Block until a decision newer than `after` lands. None on timeout."""
+        """Block until an action newer than `after` lands. None on timeout."""
         with self.cond:
             if self.seq > after:
                 return self.tail(after)
@@ -90,9 +143,26 @@ class Session:
     def tail(self, after):
         if not self.decisions.exists():
             return None
-        rows = [json.loads(l) for l in self.decisions.read_text(encoding="utf-8").splitlines() if l.strip()]
+        rows = [
+            json.loads(line)
+            for line in self.decisions.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
         newer = [r for r in rows if r.get("seq", 0) > after]
         return newer[0] if newer else None
+
+    def watch(self):
+        """Catch writes nobody announced, so a hand-edited beat still shows up."""
+        last = None
+        while True:
+            try:
+                current = self.fingerprint()
+                if last is not None and current != last:
+                    self.publish()
+                last = current
+            except OSError:
+                pass
+            time.sleep(WATCH_INTERVAL)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -111,31 +181,58 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
+    def stream_events(self):
+        """One long-lived response. Heartbeats keep proxies and browsers from closing it."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+
+        channel = self.session.subscribe()
+        try:
+            self.wfile.write(f"data: {json.dumps(self.session.snapshot())}\n\n".encode())
+            self.wfile.flush()
+            while True:
+                try:
+                    event = channel.get(timeout=HEARTBEAT)
+                    self.wfile.write(f"data: {json.dumps(event)}\n\n".encode())
+                except queue.Empty:
+                    self.wfile.write(b": ping\n\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            self.session.unsubscribe(channel)
+
     def route(self):
         return self.path.split("?", 1)[0].rstrip("/") or "/"
 
     def query(self, key, default=0):
-        match = re.search(rf"[?&]{key}=(\d+)", self.path)
-        return int(match.group(1)) if match else default
+        found = re.search(rf"[?&]{key}=(\d+)", self.path)
+        return int(found.group(1)) if found else default
 
     def do_GET(self):
         route = self.route()
         try:
+            if route == "/events":
+                return self.stream_events()
             if route == "/":
                 session, beats, css, problems, _ = self.session.load()
                 page = rr.SHELL + rr.render(session, beats, css, problems, live=True)
                 return self.send(200, page, "text/html")
             if route == "/fragment":
                 session, beats, _css, problems, _ = self.session.load()
-                return self.send(200, rr.body_html(session, beats, problems, True), "text/html")
+                return self.send(
+                    200, rr.body_html(session, beats, problems, True), "text/html"
+                )
             if route == "/state":
                 _s, beats, _c, _p, problems = self.session.load()
-                return self.send(200, json.dumps({
-                    "rev": self.session.fingerprint(),
-                    "beats": len(beats),
-                    "seq": self.session.seq,
-                    "problems": problems,
-                }))
+                return self.send(
+                    200,
+                    json.dumps({**self.session.snapshot(), "beats": len(beats), "problems": problems}),
+                )
             if route == "/await":
                 found = self.session.wait(self.query("after"), AWAIT_TIMEOUT)
                 return self.send(200, json.dumps(found or {"timeout": True}))
@@ -146,18 +243,21 @@ class Handler(BaseHTTPRequestHandler):
         self.send(404, json.dumps({"error": "no such route"}))
 
     def do_POST(self):
-        if self.route() != "/decide":
+        route = self.route()
+        if route not in ("/act", "/status"):
             return self.send(404, json.dumps({"error": "no such route"}))
         length = int(self.headers.get("Content-Length") or 0)
         if length > MAX_BODY:
             return self.send(413, "body too large", "text/plain")
         try:
             payload = json.loads(self.rfile.read(length) or b"{}")
+            if route == "/status":
+                return self.send(200, json.dumps(self.session.set_status(payload)))
             action = payload.get("action")
             if action not in ACTIONS:
                 raise ValueError(f"action must be one of {', '.join(ACTIONS)}")
             n = payload.get("n")
-            record = self.session.decide(
+            record = self.session.act(
                 int(n) if n is not None else None, action, (payload.get("note") or "").strip()
             )
         except (KeyError, ValueError, TypeError, json.JSONDecodeError) as err:
@@ -180,11 +280,13 @@ def main():
 
     css_path = Path(args.css).expanduser() if args.css else rr.default_css()
     Handler.session = Session(root, css_path)
+    threading.Thread(target=Handler.session.watch, daemon=True).start()
 
     try:
         httpd = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     except OSError as err:
         sys.exit(f"serve: {err}")
+    httpd.daemon_threads = True
 
     url = f"http://127.0.0.1:{httpd.server_address[1]}"
     (root / "serve.json").write_text(
@@ -192,8 +294,6 @@ def main():
     )
     print(url, flush=True)
 
-    # A supervising shell kills this with SIGTERM, which would otherwise skip the
-    # cleanup below and leave a serve.json pointing at a dead port.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     try:
         httpd.serve_forever()
