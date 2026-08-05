@@ -5,6 +5,9 @@ Render a walkthrough session into a self-contained report page.
 Reads <session-dir>/session.json and <session-dir>/beats/*.json, inlines
 assets/report.css, and writes one HTML file that makes no external requests.
 
+Output is a body fragment, which is what the Artifact tool wants. Pass
+--standalone for a document shell when the page will be opened as a local file.
+
 Beats are ordered by what is owed, not by beat number: open flags first, then
 accepted, then walked-and-clean. That ordering is the whole point of the page.
 
@@ -45,6 +48,13 @@ LANDS_TAG = {"landed": "Landed", "ready": "Ready", "open": "Your call"}
 # proof has to point at something a reader can re-run or open, or say up front
 # that it does not. "inferred" is the documented honest answer, not a failure.
 PROOF_EVIDENCE = re.compile(r"`[^`]+`|\b[\w./-]+\.\w+:\d+|^inferred\b")
+
+# Only for --standalone. The viewport tag is load-bearing: report.css has a
+# 620px breakpoint that never fires without it.
+SHELL = (
+    '<!doctype html>\n<html lang="en">\n<meta charset="utf-8">\n'
+    '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+)
 
 
 def md(text):
@@ -204,6 +214,11 @@ def main():
     ap.add_argument("session_dir", help="directory holding session.json and beats/")
     ap.add_argument("--out", help="output file (default <session-dir>/report.html)")
     ap.add_argument("--css", help="override assets/report.css")
+    ap.add_argument(
+        "--standalone",
+        action="store_true",
+        help="wrap in a document shell for opening as a local file",
+    )
     args = ap.parse_args()
 
     root = Path(args.session_dir).expanduser()
@@ -213,11 +228,12 @@ def main():
         else Path(__file__).resolve().parent.parent / "assets" / "report.css"
     )
     try:
-        session = json.loads((root / "session.json").read_text())
+        session = json.loads((root / "session.json").read_text(encoding="utf-8"))
         beats = [
-            json.loads(p.read_text()) for p in sorted((root / "beats").glob("*.json"))
+            json.loads(p.read_text(encoding="utf-8"))
+            for p in sorted((root / "beats").glob("*.json"))
         ]
-        css = css_path.read_text()
+        css = css_path.read_text(encoding="utf-8")
     except (OSError, json.JSONDecodeError) as err:
         sys.exit(f"render-report: {err}")
 
@@ -233,7 +249,8 @@ def main():
         all_problems.append(f"session cursor is {cursor} but {len(beats)} beat files exist")
 
     out = Path(args.out).expanduser() if args.out else root / "report.html"
-    out.write_text(render(session, beats, css, problems_by_n))
+    page = render(session, beats, css, problems_by_n)
+    out.write_text(SHELL + page if args.standalone else page, encoding="utf-8")
 
     if all_problems:
         print("render-report: rendered with problems", file=sys.stderr)
