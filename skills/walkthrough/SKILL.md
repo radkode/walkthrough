@@ -132,6 +132,16 @@ your misclassifications cheaply and put the reviewer in the driver's seat immedi
 
 ## Phase 3: walk
 
+**Serve the walk before the first beat**, in the background so it survives across turns,
+and give the reviewer the URL it prints:
+
+```bash
+$S/scripts/serve.py $R
+```
+
+The page streams beats as you write them and carries the controls: Accept and Drop on an
+open flag, Next beat anywhere. It also writes its URL to `$R/serve.json`.
+
 A beat is a coherent unit of change, usually not one file. A service plus its test plus
 the type it added is one beat. A 600-line file with two unrelated changes is two.
 
@@ -166,11 +176,26 @@ reviews get interrupted, and the large PRs that most need this are the ones nobo
 finishes in one sitting. Bump `cursor` in `session.json` as you go; the renderer reports a
 mismatch between `cursor` and the beat files it finds.
 
-**Resolving a flag.** The reviewer accepts or drops it in the same beat. On accept, in
-`branch` mode: create the fixes branch if it does not exist yet (lazily, at the first
-accept, off the recorded head, following the target repo's branch convention), apply the
-patch, run the repo's verification, and commit. One commit per accepted flag, conventional
-subject, the `FIX` line as the body. Confirm in one line and advance:
+**Waiting on the reviewer.** After presenting a beat, park on the server rather than
+ending the turn silently. Run this in the background too, so the harness wakes you when
+the reviewer acts:
+
+```bash
+curl -s "$(python3 -c "import json;print(json.load(open('$R/serve.json'))['url'])")/await?after=<seq>"
+```
+
+`<seq>` is the seq of the last decision you acted on, starting at 0. The reply is the
+decision: `{seq, n, action, note}` where action is `accept`, `drop`, or `next`. A reply of
+`{"timeout": true}` means nobody acted; say so and park again. The terminal accepts the
+same answers in words, so a closed browser never strands the walk.
+
+**Resolving a flag.** The reviewer accepts or drops it in the same beat, from the page or
+in words. The server has already flipped the beat's `state` and recorded their words as
+`call`, so do not rewrite either. On accept, in `branch` mode: create the fixes branch if
+it does not exist yet (lazily, at the first accept, off the recorded head, following the
+target repo's branch convention), apply the patch, run the repo's verification, and
+commit. One commit per accepted flag, conventional subject, the `FIX` line as the body.
+Confirm in one line and advance:
 
 ```
 landed · fix/pin-attw · 961eb58
@@ -245,6 +270,8 @@ repo, so it never shows up in `git status`. `mkdir -p` it on first write.
 session.json     repo, number, title, head, date, status, cursor, facts[], audience{}, plan[], lands[], footer
 beats/01.json    n, tier, state, claim, where, slots{}, diff[], call
 pr.diff          the saved diff
+decisions.jsonl  append-only, one line per reviewer action, written by the server
+serve.json       url and pid of the running server, removed when it exits
 report.html      rendered, regenerable, throwaway
 ```
 

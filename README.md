@@ -58,9 +58,33 @@ the first accepted flag, so a session with no accepts leaves no trace. Anything 
 real audience lands as a single GitHub review, anchor-validated first because one bad
 anchor rejects the whole thing.
 
-Either way you get a report page ordered by what is owed rather than by what was walked:
-open flags expanded at the top, accepted next, clean beats collapsed to one line each that
-still carry their proof.
+## The page drives
+
+A walk serves itself on loopback, and the page is where you actually review. Beats stream
+in as they are walked, ordered by what is owed rather than by what was walked: open flags
+expanded at the top, accepted next, clean beats collapsed to one line each that still
+carry their proof.
+
+Decisions happen there too. An open flag carries Accept and Drop plus a field for putting
+it in your own words, and Next beat advances the walk from anywhere. Clicking is what
+unblocks the terminal side, which parks on the server between beats rather than spinning.
+The terminal still takes the same answers in words, so closing the tab never strands a
+session.
+
+```
+terminal                     browser
+--------                     -------
+presents beat 5    ------>   beat 5 appears, FLAG, expanded
+(parked on /await)           [ accept ]  [ drop ]  [ your words ]
+                   <------   POST /decide
+writes the patch
+runs verification
+commits 961eb58    ------>   beat 5 flips to ACCEPTED
+presents beat 6    ------>   beat 6 arrives
+```
+
+The server is loopback-only and takes no path from any request: every read and write is a
+fixed name inside the session directory.
 
 ## Session state
 

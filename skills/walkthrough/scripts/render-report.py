@@ -56,6 +56,75 @@ SHELL = (
     '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
 )
 
+# Only for --live, which serve.py uses. Polls a fingerprint and swaps the body when
+# it moves, preserving which beats the reviewer had expanded. Decisions POST back.
+LIVE_JS = """<script>
+(() => {
+  const dot = document.getElementById('live');
+  const body = document.getElementById('live-body');
+  let rev = null, misses = 0, known = new Set();
+
+  const setDot = (cls, text) => { dot.className = 'live ' + cls; dot.textContent = text; };
+  const beatIds = () => new Set([...document.querySelectorAll('.beat')].map(d => d.dataset.n));
+  const openIds = () => new Set([...document.querySelectorAll('.beat[open]')].map(d => d.dataset.n));
+
+  async function swap() {
+    const open = openIds();
+    body.innerHTML = await (await fetch('./fragment')).text();
+    document.querySelectorAll('.beat').forEach(d => {
+      if (open.has(d.dataset.n)) d.open = true;
+      if (!known.has(d.dataset.n)) d.classList.add('is-new');
+    });
+    known = beatIds();
+    wire();
+  }
+
+  async function poll() {
+    try {
+      const state = await fetch('./state').then(r => r.json());
+      misses = 0;
+      setDot('ok', 'live');
+      if (rev !== null && state.rev !== rev) await swap();
+      rev = state.rev;
+    } catch {
+      if (++misses > 2) setDot('down', 'reconnecting');
+    }
+  }
+
+  async function decide(button) {
+    const row = button.closest('.acts');
+    const n = row.dataset.acts;
+    const note = row.querySelector('.note');
+    const msg = row.querySelector('.act-msg');
+    row.querySelectorAll('button, input').forEach(el => el.disabled = true);
+    msg.textContent = 'saving';
+    try {
+      const sent = await fetch('./decide', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          n: n === 'walk' ? null : +n,
+          action: button.dataset.action,
+          note: note ? note.value.trim() : '',
+        }),
+      });
+      if (!sent.ok) throw new Error((await sent.text()).trim() || sent.status);
+      await poll();
+    } catch (err) {
+      msg.textContent = 'not saved, ' + err.message;
+      row.querySelectorAll('button, input').forEach(el => el.disabled = false);
+    }
+  }
+
+  const wire = () => document.querySelectorAll('.act').forEach(b => b.onclick = () => decide(b));
+
+  known = beatIds();
+  wire();
+  poll();
+  setInterval(poll, 1500);
+})();
+</script>"""
+
 
 def md(text):
     """Escape, then let backticks become <code>. No HTML passthrough."""
@@ -98,9 +167,10 @@ def diff_html(lines):
     return f'<div class="diff"><pre>{"".join(out)}</pre></div>'
 
 
-def beat_html(beat, problems, expanded):
+def beat_html(beat, problems, expanded, live=False):
     suffix, token = STATE_STYLE.get(beat.get("state"), ("unver", "UNVERIFIED"))
     slots = beat.get("slots") or {}
+    n = beat.get("n", "?")
 
     chip = '<span class="unproven">unproven</span>' if problems else ""
     rows = []
@@ -117,13 +187,23 @@ def beat_html(beat, problems, expanded):
     if beat.get("call"):
         body.append(
             '<div class="call"><span class="lbl">Your call · beat '
-            f'{beat.get("n", "?")}</span><q>{md(beat["call"])}</q></div>'
+            f'{n}</span><q>{md(beat["call"])}</q></div>'
+        )
+    if live and beat.get("state") == "flag":
+        body.append(
+            f'<div class="acts" data-acts="{n}">'
+            f'<button class="act primary" data-action="accept">Accept</button>'
+            f'<button class="act" data-action="drop">Drop</button>'
+            f'<input class="note" aria-label="your words, beat {n}" '
+            f'placeholder="or put it in your own words">'
+            f'<span class="act-msg"></span>'
+            f"</div>"
         )
 
     return (
-        f'<details class="beat s-{suffix}"{" open" if expanded else ""}>'
+        f'<details class="beat s-{suffix}" data-n="{n}"{" open" if expanded else ""}>'
         f"<summary>"
-        f'<span class="b-num">{beat.get("n", "?")}</span>'
+        f'<span class="b-num">{n}</span>'
         f'<span class="b-tier">{md(beat.get("tier", ""))}</span>'
         f'<span class="b-claim"><span class="state">{token}</span> &nbsp;'
         f'{md(beat.get("claim", ""))}{chip}</span>'
@@ -134,54 +214,34 @@ def beat_html(beat, problems, expanded):
     )
 
 
-def render(session, beats, css, problems_by_n):
-    number = session.get("number")
-    label = f"#{number}" if number else session.get("head", "")[:7]
+def body_html(session, beats, problems_by_n, live=False):
+    """Everything below the masthead. This is what /fragment re-serves on a change."""
     counts = {}
     for beat in beats:
         counts[beat.get("state")] = counts.get(beat.get("state"), 0) + 1
-    clean = counts.get("clean", 0) + counts.get("unverified", 0)
-
-    parts = [
-        f'<title>{html.escape(label)} walkthrough · {html.escape(session.get("repo", ""))}</title>',
-        f"<style>\n{css}\n</style>",
-        '<div class="page">',
-        '<header class="masthead"><div class="eyebrow">'
-        f'<span>{md(session.get("repo", ""))}</span>',
-    ]
-    if number:
-        parts.append(f'<span class="sep">/</span><span>pull/{number}</span>')
-    parts.append('<span class="sep">·</span><span>walkthrough</span>')
-    if session.get("date"):
-        parts.append(f'<span class="sep">·</span><span>{md(session["date"])}</span>')
-    parts.append(
-        f'</div><h1><span class="num">{html.escape(label)}</span> '
-        f'{md(session.get("title", ""))}</h1>'
-    )
-    if session.get("facts"):
-        facts = "".join(f"<span>{md(f)}</span>" for f in session["facts"])
-        parts.append(f'<div class="facts">{facts}</div>')
-    parts.append("</header>")
 
     tiles = [
-        ("is-clean", clean, "clean"),
+        ("is-clean", counts.get("clean", 0) + counts.get("unverified", 0), "clean"),
         ("is-flag", counts.get("flag", 0), "needs your call"),
         ("is-acc", counts.get("accepted", 0), "accepted"),
         ("is-mute", len(beats), "beats walked"),
     ]
-    cells = "".join(
-        f'<div class="count {cls}"><span class="n">{n}</span>'
-        f'<span class="k">{k}</span></div>'
-        for cls, n, k in tiles
-    )
-    parts.append(f'<div class="counts">{cells}</div>')
+    parts = [
+        '<div class="counts">'
+        + "".join(
+            f'<div class="count {cls}"><span class="n">{n}</span>'
+            f'<span class="k">{k}</span></div>'
+            for cls, n, k in tiles
+        )
+        + "</div>"
+    ]
 
     for heading, hint, states, expanded in SECTIONS:
         picked = [b for b in beats if b.get("state") in states]
         if not picked:
             continue
         cards = "".join(
-            beat_html(b, problems_by_n.get(b.get("n")), expanded) for b in picked
+            beat_html(b, problems_by_n.get(b.get("n")), expanded, live) for b in picked
         )
         parts.append(
             f'<section class="sec"><div class="sec-head"><h2>{heading}</h2>'
@@ -202,11 +262,77 @@ def render(session, beats, css, problems_by_n):
             f'<span class="hint">{md(hint)}</span></div>'
             f'<div class="next">{rows}</div></section>'
         )
+    return "\n".join(parts)
+
+
+def render(session, beats, css, problems_by_n, live=False):
+    number = session.get("number")
+    label = f"#{number}" if number else session.get("head", "")[:7]
+
+    parts = [
+        f'<title>{html.escape(label)} walkthrough · {html.escape(session.get("repo", ""))}</title>',
+        f"<style>\n{css}\n</style>",
+        '<div class="page">',
+        '<header class="masthead"><div class="eyebrow">'
+        f'<span>{md(session.get("repo", ""))}</span>',
+    ]
+    if number:
+        parts.append(f'<span class="sep">/</span><span>pull/{number}</span>')
+    parts.append('<span class="sep">·</span><span>walkthrough</span>')
+    if session.get("date"):
+        parts.append(f'<span class="sep">·</span><span>{md(session["date"])}</span>')
+    if live:
+        parts.append('<span id="live" class="live ok">live</span>')
+    parts.append(
+        f'</div><h1><span class="num">{html.escape(label)}</span> '
+        f'{md(session.get("title", ""))}</h1>'
+    )
+    if session.get("facts"):
+        facts = "".join(f"<span>{md(f)}</span>" for f in session["facts"])
+        parts.append(f'<div class="facts">{facts}</div>')
+    if live:
+        parts.append(
+            '<div class="acts walk" data-acts="walk">'
+            '<button class="act" data-action="next">Next beat</button>'
+            '<span class="act-msg"></span></div>'
+        )
+    parts.append("</header>")
+
+    parts.append('<div id="live-body">')
+    parts.append(body_html(session, beats, problems_by_n, live))
+    parts.append("</div>")
 
     if session.get("footer"):
         parts.append(f"<footer>{md(session['footer'])}</footer>")
     parts.append("</div>")
+    if live:
+        parts.append(LIVE_JS)
     return "\n".join(parts)
+
+
+def load(root, css_path):
+    """Read a session off disk. Returns (session, beats, problems_by_n, problems)."""
+    session = json.loads((root / "session.json").read_text(encoding="utf-8"))
+    beats = [
+        json.loads(p.read_text(encoding="utf-8"))
+        for p in sorted((root / "beats").glob("*.json"))
+    ]
+    css = css_path.read_text(encoding="utf-8")
+
+    problems_by_n, problems = {}, []
+    for beat in beats:
+        found = validate(beat)
+        if found:
+            problems_by_n[beat.get("n")] = found
+            problems += found
+    cursor = session.get("cursor")
+    if cursor is not None and cursor != len(beats):
+        problems.append(f"session cursor is {cursor} but {len(beats)} beat files exist")
+    return session, beats, css, problems_by_n, problems
+
+
+def default_css():
+    return Path(__file__).resolve().parent.parent / "assets" / "report.css"
 
 
 def main():
@@ -219,37 +345,22 @@ def main():
         action="store_true",
         help="wrap in a document shell for opening as a local file",
     )
+    ap.add_argument(
+        "--live",
+        action="store_true",
+        help="include the polling and decision controls (serve.py uses this)",
+    )
     args = ap.parse_args()
 
     root = Path(args.session_dir).expanduser()
-    css_path = (
-        Path(args.css).expanduser()
-        if args.css
-        else Path(__file__).resolve().parent.parent / "assets" / "report.css"
-    )
+    css_path = Path(args.css).expanduser() if args.css else default_css()
     try:
-        session = json.loads((root / "session.json").read_text(encoding="utf-8"))
-        beats = [
-            json.loads(p.read_text(encoding="utf-8"))
-            for p in sorted((root / "beats").glob("*.json"))
-        ]
-        css = css_path.read_text(encoding="utf-8")
+        session, beats, css, problems_by_n, all_problems = load(root, css_path)
     except (OSError, json.JSONDecodeError) as err:
         sys.exit(f"render-report: {err}")
 
-    problems_by_n, all_problems = {}, []
-    for beat in beats:
-        found = validate(beat)
-        if found:
-            problems_by_n[beat.get("n")] = found
-            all_problems += found
-
-    cursor = session.get("cursor")
-    if cursor is not None and cursor != len(beats):
-        all_problems.append(f"session cursor is {cursor} but {len(beats)} beat files exist")
-
     out = Path(args.out).expanduser() if args.out else root / "report.html"
-    page = render(session, beats, css, problems_by_n)
+    page = render(session, beats, css, problems_by_n, args.live)
     out.write_text(SHELL + page if args.standalone else page, encoding="utf-8")
 
     if all_problems:
