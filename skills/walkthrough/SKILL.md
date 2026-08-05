@@ -173,7 +173,7 @@ patch, run the repo's verification, and commit. One commit per accepted flag, co
 subject, the `FIX` line as the body. Confirm in one line and advance:
 
 ```
-landed · jacek/pin-attw · 961eb58
+landed · fix/pin-attw · 961eb58
 ```
 
 In `review` mode, or when the flag is a decision rather than a patch, record the reviewer's
