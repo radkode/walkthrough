@@ -244,14 +244,16 @@ class Requests(SessionTest):
             with urllib.request.urlopen(request, timeout=5) as response:
                 return response.status, response.read().decode()
         except urllib.error.HTTPError as err:
-            return err.code, err.read().decode()
+            with err:
+                return err.code, err.read().decode()
 
     def get(self, route):
         try:
             with urllib.request.urlopen(self.url + route, timeout=5) as response:
                 return response.status, response.read().decode()
         except urllib.error.HTTPError as err:
-            return err.code, err.read().decode()
+            with err:
+                return err.code, err.read().decode()
 
     def raw(self, request):
         """Shapes urllib will not send, like a Content-Length that is not a number."""
