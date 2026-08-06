@@ -1,11 +1,11 @@
 ---
-name: walkthrough
+name: underwrite
 description: Interactive PR review, one beat at a time. Reconstructs what a change is for and how it fits the project, walks it in causal order while the reviewer steers, resolves each flag at the moment it is raised, and lands the accepted ones as commits or a GitHub review, whichever has a reader. Use for reviewing a PR or an unfamiliar diff, especially AI-authored changes where no author is around to answer questions.
 disable-model-invocation: true
 argument-hint: [pr-number | branch]
 ---
 
-# Walkthrough
+# Underwrite
 
 A review session the reviewer drives. Your job is to make them understand the change fast
 enough to judge it, resolve what they notice into something runnable, and land it.
@@ -235,6 +235,10 @@ entry to `session.json`. Then confirm in one line and advance:
 landed · fix/pin-attw · 961eb58
 ```
 
+If verification fails, do not commit and do not set `landed`. Rewrite the `FIX` slot to say
+what is now owed, say so, and stop. Phase 4 will refuse to render an accepted beat that
+landed nothing.
+
 In `review` mode, or when the flag is a decision rather than a patch, record the reviewer's
 words in the beat's `call` field and advance. If the working tree is dirty, say so and stop
 rather than stashing. Never push and never open a PR unasked.
@@ -293,7 +297,8 @@ gh api repos/<owner>/<repo>/pulls/<n>/reviews --method POST --input $R/review.fi
 A 422 here means the audience call was wrong upstream. Go back and fix it. Do not
 downgrade the event to make the command succeed.
 
-Write the outcome, the branch or review URL, and `status` back into `session.json`.
+Write the outcome, the branch or review URL, and `status` back into `session.json`, and set
+each accepted beat's `landed` to the review URL so every beat still names what carried it.
 
 ## Session state
 
@@ -302,7 +307,7 @@ repo, so it never shows up in `git status`. `mkdir -p` it on first write.
 
 ```
 session.json     repo, number, title, head, date, status, cursor, facts[], audience{}, plan[], lands[], footer
-beats/01.json    n, tier, state, claim, where, slots{}, diff[], call
+beats/01.json    n, tier, state, claim, where, slots{}, diff[], call, landed, branch
 pr.diff          the saved diff
 decisions.jsonl  append-only, one line per reviewer action, written by the server
 serve.json       url and pid of the running server, removed when it exits
@@ -314,6 +319,10 @@ are what a beat opens with; `accepted` and `dropped` are what a flag becomes aft
 reviewer answers. `slots` accepts only the six keys from rule 2. `diff` is a list of raw
 lines, classified on the first character. `lands[]` entries are
 `{state: landed|ready|open, what, where}`.
+
+`landed` names what an accepted beat became: a short SHA in `branch` mode, the review URL
+in `review` mode, with `branch` beside it when there is one. An accepted beat that names
+nothing does not render clean, because the reviewer said yes and nothing shows for it.
 
 These accumulate into a review history. When a later session touches the same paths, read
 the prior sessions for context.

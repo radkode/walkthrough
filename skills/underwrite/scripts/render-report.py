@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Render a walkthrough session into a self-contained report page.
+Render an underwrite session into a self-contained report page.
 
 Reads <session-dir>/session.json and <session-dir>/beats/*.json, inlines
 assets/report.css, and writes one HTML file that makes no external requests.
@@ -38,8 +38,8 @@ STATE_STYLE = {
 # (heading, hint, states, expanded by default)
 SECTIONS = (
     ("Needs your call", "out of beat order, on purpose", ("flag",), True),
-    ("Accepted", "became a commit", ("accepted",), True),
-    ("Walked and clean", "verified, nothing owed", ("clean", "unverified"), False),
+    ("Accepted", "your call, and whether it landed", ("accepted",), True),
+    ("Walked and clean", "nothing owed, proof on each", ("clean", "unverified"), False),
     ("Dropped", "raised, then set aside", ("dropped",), False),
 )
 
@@ -146,7 +146,7 @@ def md(text):
     return re.sub(r"`([^`]+)`", r"<code>\1</code>", out)
 
 
-def validate(beat):
+def validate(beat, mode="branch"):
     """Return a list of problems. Empty means the beat is shippable."""
     problems = []
     n = beat.get("n", "?")
@@ -162,6 +162,12 @@ def validate(beat):
         problems.append(f"beat {n}: no what")
     if state in ("clean", "accepted") and not slots.get("proof"):
         problems.append(f"beat {n}: {state} with no proof")
+    # An accepted flag naming nothing it landed is the gap this page used to hide: the
+    # reviewer said yes, and either the commit never happened or it never got written
+    # back. In review mode nothing lands per beat until the review is posted, so the
+    # rule would otherwise fire on every beat at the render that precedes the POST.
+    if mode == "branch" and state == "accepted" and not beat.get("landed"):
+        problems.append(f"beat {n}: accepted, nothing landed")
     if state == "flag":
         for key in ("risk", "fix"):
             if not slots.get(key):
@@ -296,7 +302,7 @@ def render(session, beats, css, problems_by_n, live=False):
     label = f"#{number}" if number else session.get("head", "")[:7]
 
     parts = [
-        f'<title>{html.escape(label)} walkthrough · {html.escape(session.get("repo", ""))}</title>',
+        f'<title>{html.escape(label)} underwrite · {html.escape(session.get("repo", ""))}</title>',
         f"<style>\n{css}\n</style>",
         '<div class="page">',
         '<header class="masthead"><div class="eyebrow">'
@@ -304,7 +310,7 @@ def render(session, beats, css, problems_by_n, live=False):
     ]
     if number:
         parts.append(f'<span class="sep">/</span><span>pull/{number}</span>')
-    parts.append('<span class="sep">·</span><span>walkthrough</span>')
+    parts.append('<span class="sep">·</span><span>underwrite</span>')
     if session.get("date"):
         parts.append(f'<span class="sep">·</span><span>{md(session["date"])}</span>')
     if live:
@@ -346,8 +352,9 @@ def load(root, css_path):
     css = css_path.read_text(encoding="utf-8")
 
     problems_by_n, problems = {}, []
+    mode = (session.get("audience") or {}).get("mode", "branch")
     for beat in beats:
-        found = validate(beat)
+        found = validate(beat, mode)
         if found:
             problems_by_n[beat.get("n")] = found
             problems += found
@@ -362,7 +369,7 @@ def default_css():
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Render a walkthrough session to HTML.")
+    ap = argparse.ArgumentParser(description="Render an underwrite session to HTML.")
     ap.add_argument("session_dir", help="directory holding session.json and beats/")
     ap.add_argument("--out", help="output file (default <session-dir>/report.html)")
     ap.add_argument("--css", help="override assets/report.css")

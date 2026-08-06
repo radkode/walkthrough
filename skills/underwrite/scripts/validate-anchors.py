@@ -26,13 +26,19 @@ SNAP_WINDOW = 20
 def clean_path(raw):
     p = raw.split("\t")[0].strip()
     if p.startswith('"') and p.endswith('"'):
-        p = p[1:-1].encode().decode("unicode_escape")
+        # Git quotes a non-ASCII path as octal escapes of its UTF-8 bytes, so the
+        # escapes have to become bytes again before decoding. Going straight from
+        # unicode_escape to str reads each byte as a codepoint: café becomes cafÃ©.
+        try:
+            p = p[1:-1].encode().decode("unicode_escape").encode("latin-1").decode("utf-8")
+        except UnicodeError:
+            p = p[1:-1]  # not UTF-8, so anchor on the raw name rather than give up
     return p[2:] if p[:2] in ("a/", "b/") else p
 
 
 def parse_diff(text):
     """Return {path: {"LEFT": {old line nos}, "RIGHT": {new line nos}}}."""
-    files, path = {}, None
+    files, path, was = {}, None, None
     old_ln = new_ln = rem_old = rem_new = 0
 
     for line in text.splitlines():
@@ -61,9 +67,17 @@ def parse_diff(text):
             old_ln, new_ln = int(m.group(1)), int(m.group(3))
             rem_old = int(m.group(2) or 1)
             rem_new = int(m.group(4) or 1)
+        elif line.startswith("diff --git "):
+            path = was = None  # so a later /dev/null cannot inherit a stale path
+        elif line.startswith("--- "):
+            target = line[4:].strip()
+            was = None if target == "/dev/null" else clean_path(target)
         elif line.startswith("+++ "):
             target = line[4:].strip()
-            path = None if target == "/dev/null" else clean_path(target)
+            # A deleted file has no new path, and GitHub anchors its comments on the
+            # old one. Skipping it left deletions, the tier walked last precisely
+            # because it carries the most risk, with nowhere to hang a comment.
+            path = was if target == "/dev/null" else clean_path(target)
             if path:
                 files.setdefault(path, {"LEFT": set(), "RIGHT": set()})
 
@@ -85,26 +99,39 @@ def validate(payload, files):
         path = c.get("path", "")
         side = c.get("side", "RIGHT")
         line = c.get("line")
-        valid = files.get(path, {}).get(side, set())
+        sides = files.get(path)
+        valid = (sides or {}).get(side, set())
 
         if line in valid:
-            kept.append(c)
-            continue
+            fixed = line
+        else:
+            fixed = snap(line, valid) if isinstance(line, int) else None
+            if fixed is None:
+                folded.append(c)
+                if sides is None:
+                    why = "file not in diff"
+                elif not valid:
+                    why = "file has no %s lines in the diff" % side
+                else:
+                    why = "no hunk within %d lines" % SNAP_WINDOW
+                report.append("fold  %s:%s %s  (%s)" % (path, line, side, why))
+                continue
+            report.append("snap  %s %s  %s -> %s" % (path, side, line, fixed))
+            c["line"] = fixed
 
-        fixed = snap(line, valid) if isinstance(line, int) else None
-        if fixed is None:
-            folded.append(c)
-            why = "file not in diff" if not valid else "no hunk within %d lines" % SNAP_WINDOW
-            report.append("fold  %s:%s %s  (%s)" % (path, line, side, why))
-            continue
-
-        report.append("snap  %s %s  %s -> %s" % (path, side, line, fixed))
-        c["line"] = fixed
+        # A multiline comment carries its start too, and GitHub rejects the whole
+        # review for a start outside the diff or at or after the end. This has to run
+        # even when the end needed no fixing, which is where a bad start used to hide.
         start = c.get("start_line")
-        if start is not None and (start not in valid or start >= fixed):
-            c.pop("start_line", None)
-            c.pop("start_side", None)
-            report.append("      dropped start_line %s (range no longer valid)" % start)
+        if start is not None:
+            begins = (sides or {}).get(c.get("start_side", side), set())
+            if start not in begins or start >= fixed:
+                c.pop("start_line", None)
+                c.pop("start_side", None)
+                report.append(
+                    "      dropped start_line %s on %s:%s (range not valid)"
+                    % (start, path, fixed)
+                )
         kept.append(c)
 
     payload["comments"] = kept

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Core-logic tests for both walkthrough scripts. Python 3 stdlib, no deps.
+"""Core-logic tests for both underwrite scripts. Python 3 stdlib, no deps.
 
     python3 -m unittest discover -s tests
 
@@ -11,7 +11,7 @@ import importlib.util
 import unittest
 from pathlib import Path
 
-SCRIPTS = Path(__file__).resolve().parent.parent / "skills" / "walkthrough" / "scripts"
+SCRIPTS = Path(__file__).resolve().parent.parent / "skills" / "underwrite" / "scripts"
 
 
 def load(stem):
@@ -53,6 +53,19 @@ class BeatValidation(unittest.TestCase):
     def test_accepted_beat_also_needs_proof(self):
         problems = rr.validate(beat(state="accepted", slots={"what": "x"}))
         self.assertIn("accepted with no proof", problems[0])
+
+    def test_accepted_with_nothing_landed_is_not_shippable(self):
+        """The reviewer said yes and the page had nothing to show for it. A real
+        session shipped two beats in exactly this state."""
+        problems = rr.validate(beat(state="accepted"))
+        self.assertIn("accepted, nothing landed", problems[0])
+
+    def test_accepted_naming_what_it_landed_is_shippable(self):
+        self.assertEqual(rr.validate(beat(state="accepted", landed="961eb58")), [])
+
+    def test_review_mode_does_not_demand_a_commit_per_beat(self):
+        """Phase 4 renders before it posts, so nothing has landed yet by design."""
+        self.assertEqual(rr.validate(beat(state="accepted"), "review"), [])
 
     def test_every_beat_needs_a_what(self):
         problems = rr.validate(beat(slots={"proof": "a.ts:1"}))
@@ -197,9 +210,33 @@ class DiffParsing(unittest.TestCase):
         files = va.parse_diff("+++ b/src/a.go\n@@ -0,0 +1 @@\n+x\n")
         self.assertIn("src/a.go", files)
 
-    def test_deleted_files_are_skipped(self):
-        files = va.parse_diff("--- a/gone.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n")
-        self.assertEqual(files, {})
+    def test_a_deleted_file_maps_its_left_lines(self):
+        """Deletions are walked last because they carry the most risk, so they have
+        to stay anchorable. This replaces a test that asserted they were skipped."""
+        files = va.parse_diff("--- a/gone.py\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-x\n-y\n")
+        self.assertEqual(files["gone.py"]["LEFT"], {1, 2})
+        self.assertEqual(files["gone.py"]["RIGHT"], set())
+
+    def test_a_new_file_has_no_left_lines(self):
+        files = va.parse_diff("--- /dev/null\n+++ b/new.py\n@@ -0,0 +1 @@\n+x\n")
+        self.assertEqual(files["new.py"]["RIGHT"], {1})
+        self.assertEqual(files["new.py"]["LEFT"], set())
+
+    def test_a_deletion_does_not_inherit_the_previous_path(self):
+        files = va.parse_diff(
+            "diff --git a/kept.py b/kept.py\n--- a/kept.py\n+++ b/kept.py\n@@ -1 +1 @@\n-a\n+b\n"
+            "diff --git a/gone.py b/gone.py\n--- a/gone.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n"
+        )
+        self.assertEqual(sorted(files), ["gone.py", "kept.py"])
+        self.assertEqual(files["gone.py"]["LEFT"], {1})
+
+    def test_a_quoted_unicode_path_decodes_to_utf8(self):
+        files = va.parse_diff('+++ "b/caf\\303\\251.py"\n@@ -0,0 +1 @@\n+x\n')
+        self.assertIn("café.py", files)
+
+    def test_a_quoted_path_that_is_not_utf8_falls_back_instead_of_raising(self):
+        files = va.parse_diff('+++ "b/a\\u00e9.py"\n@@ -0,0 +1 @@\n+x\n')
+        self.assertEqual(len(files), 1)
 
     def test_hunk_header_without_counts_means_one_line(self):
         files = va.parse_diff("+++ b/x.py\n@@ -5 +5 @@\n-was\n+only\n")
@@ -288,6 +325,48 @@ class AnchorValidation(unittest.TestCase):
     def test_side_is_respected(self):
         payload, _ = self.run_on([{"path": "x.py", "line": 10, "side": "LEFT", "body": "ok"}])
         self.assertEqual(payload["comments"][0]["line"], 10)
+
+    def test_an_invalid_start_line_is_dropped_even_when_the_end_is_valid(self):
+        """The end being valid used to return early, so the start was never looked at
+        and GitHub rejected the whole review."""
+        payload, report = self.run_on(
+            [{"path": "x.py", "line": 11, "side": "RIGHT", "start_line": 999,
+              "start_side": "RIGHT", "body": "multiline"}]
+        )
+        self.assertNotIn("start_line", payload["comments"][0])
+        self.assertIn("dropped start_line 999", report[0])
+
+    def test_an_inverted_range_is_dropped(self):
+        payload, report = self.run_on(
+            [{"path": "x.py", "line": 11, "side": "RIGHT", "start_line": 12,
+              "start_side": "RIGHT", "body": "inverted"}]
+        )
+        self.assertNotIn("start_line", payload["comments"][0])
+        self.assertIn("dropped start_line 12", report[0])
+
+    def test_a_valid_range_is_left_alone(self):
+        payload, report = self.run_on(
+            [{"path": "x.py", "line": 12, "side": "RIGHT", "start_line": 11,
+              "start_side": "RIGHT", "body": "range"}]
+        )
+        self.assertEqual(report, [])
+        self.assertEqual(payload["comments"][0]["start_line"], 11)
+
+    def test_start_line_is_checked_against_its_own_side(self):
+        """GitHub allows start_side to differ from side. Checking the start against
+        side's lines passes a start that is not on the side it claims."""
+        payload, _ = self.run_on(
+            [{"path": "x.py", "line": 12, "side": "RIGHT", "start_line": 11,
+              "start_side": "LEFT", "body": "mixed"}]
+        )
+        self.assertNotIn("start_line", payload["comments"][0])
+
+    def test_a_side_with_no_lines_says_so_rather_than_file_not_in_diff(self):
+        files = va.parse_diff("--- /dev/null\n+++ b/new.py\n@@ -0,0 +1 @@\n+x\n")
+        payload = {"body": "b", "event": "COMMENT",
+                   "comments": [{"path": "new.py", "line": 1, "side": "LEFT", "body": "n"}]}
+        report = va.validate(payload, files)
+        self.assertIn("no LEFT lines", report[0])
 
     def test_a_non_integer_line_is_folded_rather_than_crashing(self):
         payload, report = self.run_on([{"path": "x.py", "line": None, "side": "RIGHT", "body": "n"}])
