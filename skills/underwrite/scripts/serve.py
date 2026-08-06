@@ -25,7 +25,6 @@ import re
 import signal
 import sys
 import threading
-import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import ModuleType
@@ -68,6 +67,23 @@ HEARTBEAT = 20.0
 WATCH_INTERVAL = 0.5
 
 
+def write_json(path, data):
+    """Write through a temp sibling, so a reader never sees a half-written beat.
+
+    The temp name must not end in `.json`: the fingerprint below and the renderer's
+    loader both glob `*.json`, and pathlib's glob matches dotfiles too.
+    """
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        with tmp.open("w", encoding="utf-8") as fh:
+            fh.write(json.dumps(data, indent=2) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 class Session:
     """Session state, the pub/sub fanout, and the condition awaiters park on."""
 
@@ -79,11 +95,23 @@ class Session:
         self.lock = threading.Lock()
         self.subscribers = []
         self.status = {"phase": "starting", "text": "waiting for the walk to begin"}
-        self.seq = (
-            sum(1 for _ in self.decisions.open(encoding="utf-8"))
-            if self.decisions.exists()
-            else 0
-        )
+        self.stop = threading.Event()
+        self.seq = max((r.get("seq", 0) for r in self.records()), default=0)
+
+    def records(self):
+        """Every decision on disk.
+
+        seq comes from the records, never from a line count: a single blank line in
+        the log would put seq ahead of the highest record, and every /await would
+        then answer instantly with a timeout while the agent parked again.
+        """
+        if not self.decisions.exists():
+            return []
+        return [
+            json.loads(line)
+            for line in self.decisions.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
 
     def load(self):
         return rr().load(self.root, self.css_path)
@@ -132,25 +160,34 @@ class Session:
     # ---- actions -------------------------------------------------------
 
     def act(self, n, action, note):
-        """Apply a reviewer action. Only accept and drop change a beat's state."""
-        if action in RESOLVE or (action == "note" and n is not None):
-            path = self.root / "beats" / f"{n:02d}.json"
-            if not path.exists():
-                raise ValueError(f"no beat {n}")
-            beat = json.loads(path.read_text(encoding="utf-8"))
-            if action in RESOLVE:
-                if beat.get("state") != "flag":
-                    raise ValueError(f"beat {n} is {beat.get('state')}, not an open flag")
-                beat["state"] = RESOLVE[action]
-            if note:
-                beat["call"] = note
-            path.write_text(json.dumps(beat, indent=2) + "\n", encoding="utf-8")
+        """Apply a reviewer action. Only accept and drop change a beat's state.
 
+        Read, guard, write and log are one critical section. Split apart, two clients
+        resolving the same flag both pass the guard and both succeed, which is how a
+        beat ends up accepted and dropped at once. `cond` is always the outer lock and
+        is never taken while holding `self.lock`.
+        """
         with self.cond:
-            self.seq += 1
-            record = {"seq": self.seq, "n": n, "action": action, "note": note}
+            if action in RESOLVE or (action == "note" and n is not None):
+                path = self.root / "beats" / f"{n:02d}.json"
+                if not path.exists():
+                    raise ValueError(f"no beat {n}")
+                beat = json.loads(path.read_text(encoding="utf-8"))
+                if action in RESOLVE:
+                    if beat.get("state") != "flag":
+                        raise ValueError(f"beat {n} is {beat.get('state')}, not an open flag")
+                    beat["state"] = RESOLVE[action]
+                if note:
+                    beat["call"] = note
+                write_json(path, beat)
+
+            # seq advances only once the record is on disk; a failed append that had
+            # already bumped it would leave every later /await unable to match.
+            seq = self.seq + 1
+            record = {"seq": seq, "n": n, "action": action, "note": note}
             with self.decisions.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(record) + "\n")
+            self.seq = seq
             self.cond.notify_all()
         self.set_status({"phase": "working", "text": f"picking up your {action}"})
         return record
@@ -164,20 +201,13 @@ class Session:
             return self.tail(after) if self.seq > after else None
 
     def tail(self, after):
-        if not self.decisions.exists():
-            return None
-        rows = [
-            json.loads(line)
-            for line in self.decisions.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
-        newer = [r for r in rows if r.get("seq", 0) > after]
+        newer = [r for r in self.records() if r.get("seq", 0) > after]
         return newer[0] if newer else None
 
     def watch(self):
         """Catch writes nobody announced, so a hand-edited beat still shows up."""
         last = None
-        while True:
+        while not self.stop.wait(WATCH_INTERVAL):
             try:
                 current = self.fingerprint()
                 if last is not None and current != last:
@@ -185,7 +215,6 @@ class Session:
                 last = current
             except OSError:
                 pass
-            time.sleep(WATCH_INTERVAL)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -270,11 +299,16 @@ class Handler(BaseHTTPRequestHandler):
         route = self.route()
         if route not in ("/act", "/status"):
             return self.send(404, json.dumps({"error": "no such route"}))
-        length = int(self.headers.get("Content-Length") or 0)
-        if length > MAX_BODY:
-            return self.send(413, "body too large", "text/plain")
         try:
+            length = int(self.headers.get("Content-Length") or 0)
+            if length > MAX_BODY:
+                # Nothing reads the body, so this connection cannot be reused: the
+                # next request line would be parsed out of the middle of it.
+                self.close_connection = True
+                return self.send(413, "body too large", "text/plain")
             payload = json.loads(self.rfile.read(length) or b"{}")
+            if not isinstance(payload, dict):
+                raise ValueError("body must be a JSON object")
             if route == "/status":
                 return self.send(200, json.dumps(self.session.set_status(payload)))
             action = payload.get("action")
@@ -324,6 +358,7 @@ def main():
     except (KeyboardInterrupt, SystemExit):
         pass
     finally:
+        Handler.session.stop.set()
         httpd.server_close()
         (root / "serve.json").unlink(missing_ok=True)
 
