@@ -38,8 +38,8 @@ STATE_STYLE = {
 # (heading, hint, states, expanded by default)
 SECTIONS = (
     ("Needs your call", "out of beat order, on purpose", ("flag",), True),
-    ("Accepted", "became a commit", ("accepted",), True),
-    ("Walked and clean", "verified, nothing owed", ("clean", "unverified"), False),
+    ("Accepted", "your call, and whether it landed", ("accepted",), True),
+    ("Walked and clean", "nothing owed, proof on each", ("clean", "unverified"), False),
     ("Dropped", "raised, then set aside", ("dropped",), False),
 )
 
@@ -146,7 +146,7 @@ def md(text):
     return re.sub(r"`([^`]+)`", r"<code>\1</code>", out)
 
 
-def validate(beat):
+def validate(beat, mode="branch"):
     """Return a list of problems. Empty means the beat is shippable."""
     problems = []
     n = beat.get("n", "?")
@@ -162,6 +162,12 @@ def validate(beat):
         problems.append(f"beat {n}: no what")
     if state in ("clean", "accepted") and not slots.get("proof"):
         problems.append(f"beat {n}: {state} with no proof")
+    # An accepted flag naming nothing it landed is the gap this page used to hide: the
+    # reviewer said yes, and either the commit never happened or it never got written
+    # back. In review mode nothing lands per beat until the review is posted, so the
+    # rule would otherwise fire on every beat at the render that precedes the POST.
+    if mode == "branch" and state == "accepted" and not beat.get("landed"):
+        problems.append(f"beat {n}: accepted, nothing landed")
     if state == "flag":
         for key in ("risk", "fix"):
             if not slots.get(key):
@@ -346,8 +352,9 @@ def load(root, css_path):
     css = css_path.read_text(encoding="utf-8")
 
     problems_by_n, problems = {}, []
+    mode = (session.get("audience") or {}).get("mode", "branch")
     for beat in beats:
-        found = validate(beat)
+        found = validate(beat, mode)
         if found:
             problems_by_n[beat.get("n")] = found
             problems += found

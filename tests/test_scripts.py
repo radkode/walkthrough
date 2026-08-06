@@ -54,6 +54,19 @@ class BeatValidation(unittest.TestCase):
         problems = rr.validate(beat(state="accepted", slots={"what": "x"}))
         self.assertIn("accepted with no proof", problems[0])
 
+    def test_accepted_with_nothing_landed_is_not_shippable(self):
+        """The reviewer said yes and the page had nothing to show for it. A real
+        session shipped two beats in exactly this state."""
+        problems = rr.validate(beat(state="accepted"))
+        self.assertIn("accepted, nothing landed", problems[0])
+
+    def test_accepted_naming_what_it_landed_is_shippable(self):
+        self.assertEqual(rr.validate(beat(state="accepted", landed="961eb58")), [])
+
+    def test_review_mode_does_not_demand_a_commit_per_beat(self):
+        """Phase 4 renders before it posts, so nothing has landed yet by design."""
+        self.assertEqual(rr.validate(beat(state="accepted"), "review"), [])
+
     def test_every_beat_needs_a_what(self):
         problems = rr.validate(beat(slots={"proof": "a.ts:1"}))
         self.assertIn("no what", problems[0])

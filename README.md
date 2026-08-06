@@ -77,7 +77,7 @@ terminal                     browser
 --------                     -------
 presents beat 5    ------>   beat 5 appears, FLAG, expanded
 (parked on /await)           [ accept ]  [ drop ]  [ your words ]
-                   <------   POST /decide
+                   <------   POST /act
 writes the patch
 runs verification
 commits 961eb58    ------>   beat 5 flips to ACCEPTED
@@ -100,11 +100,12 @@ pr.diff          the saved diff
 report.html      rendered, regenerable
 ```
 
-The two scripts are Python 3 stdlib, no dependencies. `render-report.py` turns a session
-into the page and validates it on the way through: a flag with no fix, a clean beat with
-no proof, or a proof naming no command gets an `UNPROVEN` chip and exit 2, and the page
-still renders. `validate-anchors.py` snaps review comments to lines that exist in the diff
-and folds unsnappable ones into the body rather than dropping them.
+The three scripts are Python 3 stdlib, no dependencies. `serve.py` runs the walk.
+`render-report.py` turns a session into the page and validates it on the way through: a
+flag with no fix, a clean beat with no proof, a proof naming no command, or a beat you
+accepted that landed nothing gets an `UNPROVEN` chip and exit 2, and the page still
+renders. `validate-anchors.py` snaps review comments to lines that exist in the diff and
+folds unsnappable ones into the body rather than dropping them.
 
 Iterating on the page design means editing `skills/underwrite/assets/report.css`, or
 passing `--css` to try something without a commit.
