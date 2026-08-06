@@ -1,11 +1,11 @@
 ---
-name: walkthrough
+name: underwrite
 description: Interactive PR review, one beat at a time. Reconstructs what a change is for and how it fits the project, walks it in causal order while the reviewer steers, resolves each flag at the moment it is raised, and lands the accepted ones as commits or a GitHub review, whichever has a reader. Use for reviewing a PR or an unfamiliar diff, especially AI-authored changes where no author is around to answer questions.
 disable-model-invocation: true
 argument-hint: [pr-number | branch]
 ---
 
-# Walkthrough
+# Underwrite
 
 A review session the reviewer drives. Your job is to make them understand the change fast
 enough to judge it, resolve what they notice into something runnable, and land it.

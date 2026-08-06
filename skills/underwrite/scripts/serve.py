@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Serve a walkthrough session so the page and the walk stay in step, both ways.
+Serve an underwrite session so the page and the walk stay in step, both ways.
 
 Page to agent: POST /act carries the reviewer's action, and the agent parks on
 /await until one arrives.
@@ -292,7 +292,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Serve a walkthrough session.")
+    ap = argparse.ArgumentParser(description="Serve an underwrite session.")
     ap.add_argument("session_dir", help="directory holding session.json and beats/")
     ap.add_argument("--port", type=int, default=0, help="default 0, an ephemeral port")
     ap.add_argument("--css", help="override assets/report.css")

@@ -1,6 +1,7 @@
-# walkthrough
+# underwrite
 
-Interactive PR review for Claude Code. One beat at a time, driven by you, ending in code.
+Read a pull request closely enough to stand behind it. One beat at a time, driven by you,
+ending in code.
 
 Most review tooling hands you a wall of findings and leaves the work of deciding to you.
 This walks a change in causal order, one coherent unit per turn, and stops after each one
@@ -10,16 +11,16 @@ written and run, so it is accept-or-drop in one word. Accepted flags become comm
 ## Install
 
 ```
-/plugin marketplace add radkode/walkthrough
-/plugin install walkthrough@walkthrough
+/plugin marketplace add radkode/underwrite
+/plugin install underwrite@underwrite
 ```
 
 ## Use
 
 ```
-/walkthrough 42          a PR number
-/walkthrough my-branch   a branch, diffed against main
-/walkthrough             the working tree
+/underwrite 42          a PR number
+/underwrite my-branch   a branch, diffed against main
+/underwrite             the working tree
 ```
 
 ## How a session goes
@@ -90,7 +91,7 @@ fixed name inside the session directory.
 
 Sessions live in `~/.claude/reviews/<owner>-<repo>-pr<N>/`, outside every repo, so a review
 never shows up in `git status`. They are resumable, which matters because the large PRs
-that most need a walkthrough are the ones nobody finishes in one sitting.
+that most need underwriting are the ones nobody finishes in one sitting.
 
 ```
 session.json     facts, audience, plan, status, cursor, what lands
@@ -105,7 +106,7 @@ no proof, or a proof naming no command gets an `UNPROVEN` chip and exit 2, and t
 still renders. `validate-anchors.py` snaps review comments to lines that exist in the diff
 and folds unsnappable ones into the body rather than dropping them.
 
-Iterating on the page design means editing `skills/walkthrough/assets/report.css`, or
+Iterating on the page design means editing `skills/underwrite/assets/report.css`, or
 passing `--css` to try something without a commit.
 
 ## License

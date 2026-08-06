@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Core-logic tests for both walkthrough scripts. Python 3 stdlib, no deps.
+"""Core-logic tests for both underwrite scripts. Python 3 stdlib, no deps.
 
     python3 -m unittest discover -s tests
 
@@ -11,7 +11,7 @@ import importlib.util
 import unittest
 from pathlib import Path
 
-SCRIPTS = Path(__file__).resolve().parent.parent / "skills" / "walkthrough" / "scripts"
+SCRIPTS = Path(__file__).resolve().parent.parent / "skills" / "underwrite" / "scripts"
 
 
 def load(stem):
