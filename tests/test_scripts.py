@@ -354,6 +354,62 @@ class DiffParsing(unittest.TestCase):
         self.assertEqual(files["b.py"]["RIGHT"], {7})
 
 
+class MultiLineRanges(unittest.TestCase):
+    """GitHub rejects the whole review when a range crosses hunks or runs backwards,
+    and a flat set of line numbers cannot see either."""
+
+    DIFF = (
+        "--- a/x.py\n+++ b/x.py\n"
+        "@@ -10,2 +10,3 @@\n ctx\n+added\n ctx2\n"
+        "@@ -30,2 +30,3 @@\n ctxb\n+addedb\n ctxb2\n"
+    )
+
+    def run_on(self, **comment):
+        payload = {"body": "", "event": "COMMENT",
+                   "comments": [dict(comment, path="x.py", body="n")]}
+        report = va.validate(payload, va.parse_diff(self.DIFF))
+        return payload["comments"][0], report
+
+    def test_a_range_spanning_the_gap_between_hunks_is_dropped(self):
+        """Both ends are in the diff, so the numbers alone said yes."""
+        comment, report = self.run_on(
+            line=31, side="RIGHT", start_line=11, start_side="RIGHT")
+        self.assertNotIn("start_line", comment)
+        self.assertIn("same hunk", report[0])
+
+    # Earlier deletions push the old numbering ahead of the new one, which is the only
+    # shape where comparing the two numbers gives a different answer than reading the
+    # hunk. A start of 30 on LEFT genuinely precedes an end of 11 on RIGHT.
+    SHIFTED = "--- a/y.py\n+++ b/y.py\n@@ -30,2 +10,3 @@\n-gone\n+new\n+more\n ctx\n"
+
+    def test_a_mixed_side_range_inside_one_hunk_survives(self):
+        """Old and new numbering are different coordinate spaces, so comparing them as
+        numbers stripped ranges GitHub accepts."""
+        payload = {"body": "", "event": "COMMENT", "comments": [
+            {"path": "y.py", "line": 11, "side": "RIGHT",
+             "start_line": 30, "start_side": "LEFT", "body": "n"}]}
+        report = va.validate(payload, va.parse_diff(self.SHIFTED))
+        self.assertEqual(payload["comments"][0]["start_line"], 30)
+        self.assertEqual(report, [])
+
+    def test_an_inverted_range_inside_one_hunk_is_still_dropped(self):
+        comment, report = self.run_on(
+            line=10, side="RIGHT", start_line=12, start_side="RIGHT")
+        self.assertNotIn("start_line", comment)
+        self.assertIn("come first", report[0])
+
+    def test_an_ordinary_range_is_left_alone(self):
+        comment, report = self.run_on(
+            line=12, side="RIGHT", start_line=11, start_side="RIGHT")
+        self.assertEqual(comment["start_line"], 11)
+        self.assertEqual(report, [])
+
+    def test_the_flat_sets_still_answer_the_single_line_question(self):
+        files = va.parse_diff(self.DIFF)
+        self.assertEqual(files["x.py"]["RIGHT"], {10, 11, 12, 30, 31, 32})
+        self.assertEqual(len(files["x.py"]["hunks"]), 2)
+
+
 class DiffReading(unittest.TestCase):
     """Whatever parse_diff does with a separator is moot if the read already ate it.
     Text mode turns a lone \\r into \\n, so the in-process tests above passed while the

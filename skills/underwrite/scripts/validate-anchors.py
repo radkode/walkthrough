@@ -37,8 +37,15 @@ def clean_path(raw):
 
 
 def parse_diff(text):
-    """Return {path: {"LEFT": {old line nos}, "RIGHT": {new line nos}}}."""
+    """Return {path: {"LEFT": {old lines}, "RIGHT": {new lines}, "hunks": [hunk]}}.
+
+    A hunk is {"LEFT": set, "RIGHT": set, "pos": {(side, line): index}}. The flat sets
+    answer "is this line in the diff"; the hunks answer the two questions GitHub asks
+    of a multi-line comment and rejects the whole review over, which a flat set cannot:
+    are both ends in the same hunk, and does the start really come first.
+    """
     files, path, was = {}, None, None
+    hunk = None
     old_ln = new_ln = rem_old = rem_new = 0
 
     # Only \n ends a diff line. splitlines() also breaks on \r, \v, \f, \x1c-\x1e,
@@ -56,14 +63,14 @@ def parse_diff(text):
                 continue
             tag = line[:1]
             if tag == " " or line == "":
-                files[path]["LEFT"].add(old_ln)
-                files[path]["RIGHT"].add(new_ln)
+                mark(files[path], hunk, "LEFT", old_ln)
+                mark(files[path], hunk, "RIGHT", new_ln)
                 old_ln, new_ln, rem_old, rem_new = old_ln + 1, new_ln + 1, rem_old - 1, rem_new - 1
             elif tag == "+":
-                files[path]["RIGHT"].add(new_ln)
+                mark(files[path], hunk, "RIGHT", new_ln)
                 new_ln, rem_new = new_ln + 1, rem_new - 1
             elif tag == "-":
-                files[path]["LEFT"].add(old_ln)
+                mark(files[path], hunk, "LEFT", old_ln)
                 old_ln, rem_old = old_ln + 1, rem_old - 1
             else:
                 rem_old = rem_new = 0  # malformed hunk, resync on the next header
@@ -74,6 +81,8 @@ def parse_diff(text):
             old_ln, new_ln = int(m.group(1)), int(m.group(3))
             rem_old = int(m.group(2) or 1)
             rem_new = int(m.group(4) or 1)
+            hunk = {"LEFT": set(), "RIGHT": set(), "pos": {}}
+            files[path]["hunks"].append(hunk)
         elif line.startswith("diff --git "):
             path = was = None  # so a later /dev/null cannot inherit a stale path
         elif line.startswith("--- "):
@@ -86,9 +95,24 @@ def parse_diff(text):
             # because it carries the most risk, with nowhere to hang a comment.
             path = was if target == "/dev/null" else clean_path(target)
             if path:
-                files.setdefault(path, {"LEFT": set(), "RIGHT": set()})
+                files.setdefault(path, {"LEFT": set(), "RIGHT": set(), "hunks": []})
 
     return files
+
+
+def mark(entry, hunk, side, line):
+    """Record a line on both the file-wide set and the hunk it came from."""
+    entry[side].add(line)
+    if hunk is not None:
+        hunk[side].add(line)
+        hunk["pos"].setdefault((side, line), len(hunk["pos"]))
+
+
+def hunk_holding(sides, side, line):
+    for hunk in sides.get("hunks") or ():
+        if line in hunk[side]:
+            return hunk
+    return None
 
 
 def snap(line, valid):
@@ -127,17 +151,28 @@ def validate(payload, files):
             c["line"] = fixed
 
         # A multiline comment carries its start too, and GitHub rejects the whole
-        # review for a start outside the diff or at or after the end. This has to run
-        # even when the end needed no fixing, which is where a bad start used to hide.
+        # review for a start outside the diff, in a different hunk, or not before the
+        # end. This has to run even when the end needed no fixing, which is where a bad
+        # start used to hide.
         start = c.get("start_line")
         if start is not None:
-            begins = (sides or {}).get(c.get("start_side", side), set())
-            if start not in begins or start >= fixed:
+            start_side = c.get("start_side", side)
+            hunk = hunk_holding(sides or {}, side, fixed)
+            why = None
+            if hunk is None or (start_side, start) not in hunk["pos"]:
+                # Comparing the numbers alone let a range span the gap between two
+                # hunks, which is the exact 422 this script exists to prevent.
+                why = "not in the same hunk"
+            elif hunk["pos"][(start_side, start)] >= hunk["pos"][(side, fixed)]:
+                # By position, not by number: an old-file line and a new-file line are
+                # different coordinate spaces, and comparing them stripped valid
+                # mixed-side ranges while passing genuinely inverted ones.
+                why = "start does not come first"
+            if why:
                 c.pop("start_line", None)
                 c.pop("start_side", None)
                 report.append(
-                    "      dropped start_line %s on %s:%s (range not valid)"
-                    % (start, path, fixed)
+                    "      dropped start_line %s on %s:%s (%s)" % (start, path, fixed, why)
                 )
         kept.append(c)
 
