@@ -168,6 +168,11 @@ def validate(beat, mode="branch"):
     # rule would otherwise fire on every beat at the render that precedes the POST.
     if mode == "branch" and state == "accepted" and not beat.get("landed"):
         problems.append(f"beat {n}: accepted, nothing landed")
+    # The mirror, and the shape a decision taken in words leaves when it never reaches
+    # the server: the fix committed, the beat still open, and the rule above looking
+    # straight past it because it keys on the state that was never set.
+    if beat.get("landed") and state != "accepted":
+        problems.append(f"beat {n}: landed {beat['landed']} but state is {state!r}")
     if state == "flag":
         for key in ("risk", "fix"):
             if not slots.get(key):
