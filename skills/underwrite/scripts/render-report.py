@@ -402,8 +402,17 @@ def default_css():
     return Path(__file__).resolve().parent.parent / "assets" / "report.css"
 
 
+class Usage(argparse.ArgumentParser):
+    """argparse exits 2 on a usage error, and 2 already means "rendered, but a beat
+    is unproven" to Phase 4. A typo'd flag read as a beat to go and fix, with no page
+    on disk to fix it against."""
+
+    def error(self, message):
+        sys.exit(f"render-report: {message}")
+
+
 def main():
-    ap = argparse.ArgumentParser(description="Render an underwrite session to HTML.")
+    ap = Usage(description="Render an underwrite session to HTML.")
     ap.add_argument("session_dir", help="directory holding session.json and beats/")
     ap.add_argument("--out", help="output file (default <session-dir>/report.html)")
     ap.add_argument("--css", help="override assets/report.css")

@@ -5,11 +5,15 @@
 
 Covers what a file on disk cannot show: that two clients cannot resolve one flag
 two ways, that a beat is never left half-written, that a park wakes when someone
-acts and not before, and that a malformed request gets an answer instead of
-dropping the connection.
+acts and not before, that a malformed request gets an answer instead of dropping
+the connection, and that everything the page needs reaches it without asking.
 """
+import contextlib
 import importlib.util
+import io
 import json
+import os
+import queue
 import shutil
 import signal
 import socket
@@ -21,7 +25,6 @@ import time
 import unittest
 import urllib.error
 import urllib.request
-from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
@@ -248,8 +251,6 @@ class Parking(SessionTest):
         self.assertEqual(woke[0]["action"], "next")
 
 
-
-
 class LettingGo(SessionTest):
     """A park used to hold its slot for the full 900s after the client vanished, so
     `listening` lied and one packet bought a thread for a quarter of an hour."""
@@ -324,14 +325,150 @@ class ATornLog(SessionTest):
         session.act(None, "next", "")
         self.assertNotIn(
             "\n\n", (self.root / "decisions.jsonl").read_text(encoding="utf-8"))
+
+
+class Watching(SessionTest):
+    """The watcher is what makes a beat the agent wrote straight to disk, which is
+    every beat, show up on a page nobody told about it.
+
+    Driven a reading at a time rather than by a thread and a sleep, because the loop
+    has no baseline until its first reading lands. A test that raced that tick saw no
+    event, and could not tell that apart from a watcher that was broken.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.channel = self.session.subscribe()
+
+    def readings(self, *between):
+        """Take a baseline reading, then one more after each callable runs.
+
+        The loop asks `stop.wait` whether to keep going, so standing in for it is what
+        turns an interval into a step. The real body runs untouched.
+        """
+        steps, taken = list(between), 0
+
+        def wait(_interval):
+            nonlocal taken
+            taken += 1
+            if taken == 1:
+                return False
+            if not steps:
+                return True
+            steps.pop(0)()
+            return False
+
+        self.session.stop.wait = wait
+        try:
+            self.session.watch()
+        finally:
+            del self.session.stop.wait
+
+    def test_a_beat_written_behind_its_back_still_reaches_the_page(self):
+        self.readings(lambda: self.put(dict(FLAG, state="dropped")))
+        self.assertEqual(self.channel.get_nowait()["rev"], self.session.fingerprint())
+
+    def test_a_reading_that_matches_the_last_one_publishes_nothing(self):
+        """A watcher that published every time it looked would swap the body out from
+        under the reviewer twice a second."""
+        self.readings(lambda: None)
+        self.assertTrue(self.channel.empty())
+
+    def test_a_file_that_vanishes_does_not_take_the_watcher_with_it(self):
+        """It runs on a daemon thread nobody joins, so an exception here is silent:
+        the page simply stops updating for the rest of the session."""
+        kept = (self.root / "session.json").read_bytes()
+        self.readings(
+            lambda: (self.root / "session.json").unlink(),
+            lambda: (self.root / "session.json").write_bytes(kept),
+        )
+        self.assertIsNotNone(self.channel.get_nowait())
+
+
+class HotReload(SessionTest):
+    """Editing the renderer mid-session used to do nothing while the CSS reloaded on
+    every request, which is a confusing pair of rules to hold in your head at once."""
+
+    def setUp(self):
+        super().setUp()
+        self.file = self.root / "render.py"
+        # LIFO, so RENDERER is the real one again before the cache is cleared and the
+        # next test to render reloads it.
+        self.addCleanup(self.forget)
+        patcher = mock.patch.object(serve, "RENDERER", self.file)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.forget()
+
+    def forget(self):
+        serve._renderer = serve._renderer_mtime = None
+
+    def test_an_untouched_renderer_is_not_re_executed(self):
+        self.file.write_text("VALUE = 1\n", encoding="utf-8")
+        first = serve.rr()
+        self.assertEqual(first.VALUE, 1)
+        self.assertIs(serve.rr(), first)
+
+    def test_an_edit_takes_effect_without_a_restart(self):
+        self.file.write_text("VALUE = 1\n", encoding="utf-8")
+        serve.rr()
+        self.file.write_text("VALUE = 2\n", encoding="utf-8")
+        self.assertEqual(serve.rr().VALUE, 2)
+
+    def test_an_edit_that_moves_neither_the_mtime_nor_the_size_still_lands(self):
+        """Two same-length edits inside one second are ordinary while iterating on the
+        tool itself, and stat alone cannot tell them apart."""
+        self.file.write_text("VALUE = 1\n", encoding="utf-8")
+        was = self.file.stat()
+        serve.rr()
+        self.file.write_text("VALUE = 2\n", encoding="utf-8")
+        os.utime(self.file, ns=(was.st_atime_ns, was.st_mtime_ns))
+        self.assertEqual(self.file.stat().st_mtime_ns, was.st_mtime_ns)
+        self.assertEqual(serve.rr().VALUE, 2)
+
+
+class PathParsing(unittest.TestCase):
+    """Route and query come off the raw path by hand, and both decide which of the
+    seven routes a request reaches."""
+
+    def handler(self, path):
+        handler = serve.Handler.__new__(serve.Handler)
+        handler.path = path
+        return handler
+
+    def test_a_query_string_does_not_become_part_of_the_route(self):
+        self.assertEqual(self.handler("/await?after=3").route(), "/await")
+
+    def test_a_trailing_slash_is_the_same_route(self):
+        self.assertEqual(self.handler("/state/").route(), "/state")
+
+    def test_the_root_survives_being_stripped(self):
+        self.assertEqual(self.handler("/").route(), "/")
+
+    def test_after_is_read_from_the_only_parameter(self):
+        self.assertEqual(self.handler("/await?after=7").query("after"), 7)
+
+    def test_after_is_read_from_among_several(self):
+        self.assertEqual(self.handler("/await?t=1&after=7").query("after"), 7)
+
+    def test_no_after_starts_from_the_beginning(self):
+        self.assertEqual(self.handler("/await").query("after"), 0)
+
+    def test_an_after_that_is_not_a_number_does_not_raise(self):
+        """It arrives from the page, so a 500 here is a walk that stops parking."""
+        self.assertEqual(self.handler("/await?after=abc").query("after"), 0)
+
+    def test_a_parameter_that_merely_ends_in_after_is_not_it(self):
+        self.assertEqual(self.handler("/await?nafter=7").query("after"), 0)
+
+
 class Served(SessionTest):
     """A live server on an ephemeral port, plus the three ways to talk to it."""
 
     def setUp(self):
         super().setUp()
         handler = type("Handler", (serve.Handler,), {"session": self.session})
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-        self.httpd.daemon_threads = True
+        self.httpd = serve.Server(("127.0.0.1", 0), handler)
         # Poll faster than the 0.5s default purely so teardown does not dominate the
         # suite: shutdown() waits for serve_forever to come round again.
         thread = threading.Thread(target=self.httpd.serve_forever, args=(0.01,), daemon=True)
@@ -503,6 +640,178 @@ class Forgery(Served):
         self.assertEqual(self.post("/act", {"n": 1, "action": "accept"})[0], 200)
 
 
+class Streaming(Served):
+    """/events is the whole reason the page never polls: both directions of the walk
+    land on it. Every assertion here is something the reviewer would otherwise have
+    to reload the page to find out."""
+
+    def stream(self):
+        """A raw socket, because urllib wants a response that ends. makefile holds a
+        reference of its own, so hanging up means closing both."""
+        sock = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        fh = sock.makefile("rb")
+        self.addCleanup(sock.close)
+        self.addCleanup(fh.close)
+        sock.sendall(b"GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        return sock, fh
+
+    def frames(self, fh, count=1):
+        """The next `count` data frames, each read up to its blank terminator so the
+        stream is left on a boundary. Reading one proves the subscription exists,
+        which is what keeps the tests below from racing their own setup."""
+        out = []
+        while len(out) < count:
+            line = fh.readline()
+            if not line:
+                break
+            if line.startswith(b"data: "):
+                out.append(json.loads(line[6:]))
+                fh.readline()
+        return out
+
+    def test_a_new_stream_opens_with_the_state_as_it_stands(self):
+        """The page is built server-side and then goes live, so a first frame that
+        never came would leave the controls disabled with nothing to explain it."""
+        first = self.frames(self.stream()[1])[0]
+        self.assertEqual(first["seq"], 0)
+        self.assertEqual(first["status"]["phase"], "starting")
+        self.assertFalse(first["listening"])
+
+    def test_an_action_reaches_the_page_without_it_asking(self):
+        fh = self.stream()[1]
+        self.frames(fh)
+        self.session.act(1, "accept", "yes")
+        self.assertEqual(self.frames(fh)[0]["seq"], 1)
+
+    def test_what_the_agent_is_doing_reaches_the_page(self):
+        """The half files alone cannot express: applying an accept, running tests and
+        parked all look identical on disk."""
+        fh = self.stream()[1]
+        self.frames(fh)
+        self.post("/status", {"phase": "working", "text": "running tests"})
+        self.assertEqual(self.frames(fh)[0]["status"]["text"], "running tests")
+
+    def test_both_edges_of_a_park_reach_the_page(self):
+        """`listening` is what the page swaps its away copy on, and it is inferred
+        from nothing else: an agent that died mid-walk leaves its last status standing."""
+        fh = self.stream()[1]
+        self.frames(fh)
+        waiter = threading.Thread(target=lambda: self.session.wait(0, 5.0))
+        waiter.start()
+        self.assertTrue(self.frames(fh)[0]["listening"])
+        self.session.act(None, "next", "")
+        waiter.join(5.0)
+        self.assertFalse(self.frames(fh, 2)[-1]["listening"])
+
+    def test_a_silent_stream_still_gets_a_heartbeat(self):
+        """A long beat is minutes of silence, and an idle connection is exactly what a
+        browser or a proxy will close underneath it."""
+        with mock.patch.object(serve, "HEARTBEAT", 0.05):
+            fh = self.stream()[1]
+            self.frames(fh)
+            self.assertEqual(fh.readline(), b": ping\n")
+
+    def test_a_page_that_goes_away_stops_being_a_subscriber(self):
+        """Every subscriber holds an unbounded queue, so a leak here is a session
+        accumulating a copy of every event for a tab that closed hours ago."""
+        sock, fh = self.stream()
+        self.frames(fh)
+        self.assertEqual(len(self.session.subscribers), 1)
+        fh.close()
+        sock.close()
+        for _ in range(200):
+            self.session.publish()
+            if not self.session.subscribers:
+                break
+            time.sleep(0.01)
+        self.assertEqual(self.session.subscribers, [])
+
+
+class Awaiting(Served):
+    """The route the walk itself lives on. Session.wait is covered directly, but
+    nothing had run the route that decides which action it is told about."""
+
+    def test_it_answers_with_the_action_that_landed(self):
+        self.session.act(1, "accept", "yes")
+        status, body = self.get("/await?after=0")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["action"], "accept")
+
+    def test_after_skips_what_the_walk_already_saw(self):
+        self.session.act(None, "next", "")
+        self.session.act(None, "skip", "")
+        self.assertEqual(json.loads(self.get("/await?after=1")[1])["action"], "skip")
+
+    def test_nothing_new_answers_a_timeout_rather_than_hanging_up(self):
+        """The walk is told a timeout means nobody acted, and reparks. A dropped
+        connection instead would end the walk."""
+        with mock.patch.object(serve, "AWAIT_TIMEOUT", 0.05):
+            self.assertEqual(json.loads(self.get("/await?after=0")[1]), {"timeout": True})
+
+    def test_a_park_wakes_the_moment_the_page_acts(self):
+        with mock.patch.object(serve, "AWAIT_TIMEOUT", 10.0):
+            answers = []
+            walk = threading.Thread(
+                target=lambda: answers.append(self.get("/await?after=0")))
+            walk.start()
+            time.sleep(0.1)
+            self.post("/act", {"n": 1, "action": "accept", "note": "yes"})
+            walk.join(15.0)
+        self.assertEqual(json.loads(answers[0][1])["action"], "accept")
+        self.assertEqual(self.beat(1)["state"], "accepted")
+
+
+class Fragment(Served):
+    """What the page swaps in on every change. It has to keep the controls, or the
+    page goes read-only after the first thing that happens on it."""
+
+    def test_it_carries_the_beats_and_the_controls(self):
+        status, body = self.get("/fragment")
+        self.assertEqual(status, 200)
+        self.assertIn('data-action="accept"', body)
+        self.assertIn('data-n="1"', body)
+
+    def test_it_is_a_fragment_and_not_a_page(self):
+        body = self.get("/fragment")[1]
+        self.assertNotIn("<title>", body)
+        self.assertNotIn("<style>", body)
+
+    def test_it_is_exactly_what_the_page_already_holds(self):
+        """The two are rendered by separate calls, and any disagreement shows up as
+        the body flickering into something else on the first swap."""
+        self.assertIn(self.get("/fragment")[1], self.get("/")[1])
+
+    def test_it_shows_the_call_that_was_just_made(self):
+        self.post("/act", {"n": 1, "action": "accept", "note": "yes, pin it"})
+        body = self.get("/fragment")[1]
+        self.assertIn("s-acc", body)
+        self.assertIn("yes, pin it", body)
+
+
+class QuietHangUps(unittest.TestCase):
+    """The terminal belongs to the walk, the same rule log_message follows. Closing
+    the tab, or a park whose page went away, put a full stack trace in front of the
+    reviewer, from a keep-alive read that was never going to succeed."""
+
+    def through(self, err):
+        server = serve.Server.__new__(serve.Server)
+        captured = io.StringIO()
+        try:
+            raise err
+        except type(err):
+            with contextlib.redirect_stderr(captured):
+                server.handle_error(None, ("127.0.0.1", 1))
+        return captured.getvalue()
+
+    def test_a_client_hanging_up_says_nothing(self):
+        for err in (ConnectionResetError(), BrokenPipeError(), socket.timeout()):
+            with self.subTest(err=type(err).__name__):
+                self.assertEqual(self.through(err), "")
+
+    def test_a_real_fault_still_reaches_the_terminal(self):
+        self.assertIn("ValueError", self.through(ValueError("a real bug")))
+
+
 class Lifecycle(unittest.TestCase):
     """main() is unreachable in-process, and the skill depends on all of it."""
 
@@ -563,6 +872,16 @@ class Lifecycle(unittest.TestCase):
         )
         self.assertEqual(done.returncode, 1)
         self.assertIn("no session.json", done.stderr)
+
+    def test_a_usage_error_exits_1_like_the_header_says(self):
+        """argparse spends 2 on this, and 2 is the code the other two scripts use for
+        something the walk is told to carry on after."""
+        done = subprocess.run(
+            [sys.executable, str(SCRIPTS / "serve.py"), "--bogus", str(self.root)],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("serve:", done.stderr)
 
 
 if __name__ == "__main__":

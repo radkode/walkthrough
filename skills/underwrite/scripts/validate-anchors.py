@@ -185,8 +185,17 @@ def validate(payload, files):
     return report
 
 
+class Usage(argparse.ArgumentParser):
+    """argparse exits 2 on a usage error, and 2 already means "anchors moved, carry
+    on" to Phase 4. Forgetting --diff read as success, and the review that followed
+    posted whatever --out happened to hold from the run before."""
+
+    def error(self, message):
+        sys.exit(f"validate-anchors: {message}")
+
+
 def main():
-    ap = argparse.ArgumentParser()
+    ap = Usage()
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--pr", help="PR number; fetches the diff with gh")
     src.add_argument("--diff", help="path to a unified diff, or - for stdin")

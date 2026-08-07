@@ -9,6 +9,8 @@ what happens to an anchor that does not land on one.
 """
 import importlib.util
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -458,6 +460,182 @@ class DiffReading(unittest.TestCase):
         code, payload = self.run_cli(self.CR, 900)
         self.assertEqual(code, 2)
         self.assertEqual(payload["comments"], [])
+
+
+class RenderCli(unittest.TestCase):
+    """Phase 4 branches on the exit code and then reads the file. Both halves of that
+    were only ever exercised by hand."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, True)
+        (self.root / "beats").mkdir()
+        self.session({"repo": "acme/widget", "number": 42})
+
+    def session(self, data):
+        (self.root / "session.json").write_text(json.dumps(data), encoding="utf-8")
+
+    def put(self, b):
+        (self.root / "beats" / ("%02d.json" % b["n"])).write_text(
+            json.dumps(b), encoding="utf-8")
+
+    def run_cli(self, *args):
+        return subprocess.run(
+            [sys.executable, str(SCRIPTS / "render-report.py"), str(self.root), *args],
+            capture_output=True, text=True,
+        )
+
+    def page(self, name="report.html"):
+        return (self.root / name).read_text(encoding="utf-8")
+
+    def test_a_clean_session_exits_0_and_writes_the_page(self):
+        self.put(beat(n=1))
+        done = self.run_cli()
+        self.assertEqual(done.returncode, 0)
+        self.assertIn("rendered 1 beats", done.stderr)
+        self.assertIn("acme/widget", self.page())
+
+    def test_an_unproven_beat_exits_2_and_still_writes_the_page(self):
+        """Never fail at the last step of a session. The reviewer needs the page in
+        order to see which beat to go and fix."""
+        self.put(beat(n=1, slots={"what": "x"}))
+        done = self.run_cli()
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("clean with no proof", done.stderr)
+        self.assertIn("unproven", self.page())
+
+    def test_a_cursor_that_disagrees_with_the_beats_exits_2(self):
+        """The one problem no per-beat check can see: a beat that never got written
+        leaves every beat that did valid."""
+        self.session({"repo": "acme/widget", "cursor": 3})
+        self.put(beat(n=1))
+        done = self.run_cli()
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("cursor is 3 but 1 beat files exist", done.stderr)
+
+    def test_a_session_that_will_not_parse_exits_1(self):
+        (self.root / "session.json").write_text("{ half written", encoding="utf-8")
+        done = self.run_cli()
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("render-report:", done.stderr)
+        self.assertFalse((self.root / "report.html").exists())
+
+    def test_a_usage_error_exits_1_rather_than_naming_a_beat_to_fix(self):
+        """argparse spends 2 on this, and 2 already means "rendered, go fix a beat".
+        A mistyped flag sent the walk looking for a page that was never written."""
+        done = subprocess.run(
+            [sys.executable, str(SCRIPTS / "render-report.py"), "--bogus", str(self.root)],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("render-report:", done.stderr)
+
+    def test_standalone_adds_the_shell_and_plain_stays_a_fragment(self):
+        """The viewport tag lives in the shell, and report.css has a 620px breakpoint
+        that never fires without it."""
+        self.put(beat(n=1))
+        self.run_cli("--standalone")
+        self.assertTrue(self.page().startswith("<!doctype html>"))
+        self.assertIn("viewport", self.page())
+        self.run_cli()
+        self.assertNotIn("<!doctype", self.page())
+
+    def test_live_adds_the_controls_and_plain_does_not(self):
+        self.put(beat(n=1))
+        self.run_cli("--live")
+        self.assertIn('data-action="note"', self.page())
+        self.run_cli()
+        self.assertNotIn("data-action", self.page())
+
+    def test_out_puts_the_page_where_it_is_told(self):
+        self.put(beat(n=1))
+        self.run_cli("--out", str(self.root / "elsewhere.html"))
+        self.assertIn("acme/widget", self.page("elsewhere.html"))
+        self.assertFalse((self.root / "report.html").exists())
+
+
+class AnchorCli(unittest.TestCase):
+    """The exit codes Phase 4 reads, and the two input modes the header documents but
+    the skill does not use. Only --diff on a file had ever been run."""
+
+    DIFF = b"+++ b/x.py\n@@ -10,2 +10,3 @@\n ctx\n+a\n+b\n"
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        (self.dir / "pr.diff").write_bytes(self.DIFF)
+        self.payload(11)
+
+    def payload(self, line):
+        (self.dir / "review.json").write_text(
+            json.dumps({"body": "head", "event": "COMMENT", "comments": [
+                {"path": "x.py", "line": line, "side": "RIGHT", "body": "n"}]}),
+            encoding="utf-8",
+        )
+
+    def run_cli(self, *args, **kw):
+        return subprocess.run(
+            [sys.executable, str(SCRIPTS / "validate-anchors.py"), *args],
+            capture_output=True, text=True, cwd=str(self.dir), **kw,
+        )
+
+    def stub_gh(self, code=0):
+        """--pr is the invocation the header documents first, and it shells out."""
+        bin_dir = self.dir / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        gh = bin_dir / "gh"
+        gh.write_text(
+            "#!/bin/sh\ncat %s\nexit %d\n" % (self.dir / "pr.diff", code), encoding="utf-8")
+        gh.chmod(0o755)
+        return dict(os.environ, PATH="%s:%s" % (bin_dir, os.environ.get("PATH", "")))
+
+    def test_a_valid_anchor_exits_0_and_says_so(self):
+        done = self.run_cli("--diff", "pr.diff", "--payload", "review.json")
+        self.assertEqual(done.returncode, 0)
+        self.assertIn("all anchors valid", done.stderr)
+        self.assertEqual(json.loads(done.stdout)["comments"][0]["line"], 11)
+
+    def test_with_no_out_the_corrected_payload_goes_to_stdout(self):
+        self.payload(15)
+        done = self.run_cli("--diff", "pr.diff", "--payload", "review.json")
+        self.assertEqual(done.returncode, 2)
+        self.assertEqual(json.loads(done.stdout)["comments"][0]["line"], 12)
+        self.assertIn("snap", done.stderr)
+
+    def test_a_diff_on_stdin_is_read_the_same_way(self):
+        done = self.run_cli(
+            "--diff", "-", "--payload", "review.json", input=self.DIFF.decode())
+        self.assertEqual(done.returncode, 0)
+
+    def test_pr_mode_takes_the_diff_from_gh(self):
+        done = self.run_cli("--pr", "42", "--payload", "review.json", env=self.stub_gh())
+        self.assertEqual(done.returncode, 0)
+        self.assertIn("all anchors valid", done.stderr)
+
+    def test_gh_failing_exits_1_rather_than_validating_against_nothing(self):
+        """An empty diff makes every anchor unanchorable, so the quiet version of this
+        is a review with every comment folded into the body and no hint why."""
+        done = self.run_cli(
+            "--pr", "42", "--payload", "review.json", env=self.stub_gh(code=1))
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("validate-anchors:", done.stderr)
+
+    def test_a_payload_that_will_not_parse_exits_1(self):
+        (self.dir / "review.json").write_text("{ half written", encoding="utf-8")
+        done = self.run_cli("--diff", "pr.diff", "--payload", "review.json")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("validate-anchors:", done.stderr)
+
+    def test_a_diff_that_is_not_there_exits_1(self):
+        done = self.run_cli("--diff", "nope.diff", "--payload", "review.json")
+        self.assertEqual(done.returncode, 1)
+
+    def test_forgetting_the_diff_exits_1_rather_than_looking_like_a_fixed_anchor(self):
+        """2 means "anchors moved, carry on", and Phase 4 then posts --out. Left at
+        argparse's own 2, that is whatever the run before it happened to write."""
+        done = self.run_cli("--payload", "review.json")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("validate-anchors:", done.stderr)
 
 
 class Snapping(unittest.TestCase):
