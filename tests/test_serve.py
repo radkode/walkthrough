@@ -219,7 +219,9 @@ class Parking(SessionTest):
         self.assertEqual(woke[0]["action"], "next")
 
 
-class Requests(SessionTest):
+class Served(SessionTest):
+    """A live server on an ephemeral port, plus the three ways to talk to it."""
+
     def setUp(self):
         super().setUp()
         handler = type("Handler", (serve.Handler,), {"session": self.session})
@@ -264,6 +266,8 @@ class Requests(SessionTest):
         finally:
             sock.close()
 
+
+class Requests(Served):
     def test_an_accept_over_http_resolves_the_flag(self):
         status, body = self.post("/act", {"n": 1, "action": "accept", "note": "yes"})
         self.assertEqual(status, 200)
@@ -272,7 +276,7 @@ class Requests(SessionTest):
 
     def test_a_content_length_that_is_not_a_number_answers_400(self):
         self.assertIn("400", self.raw(
-            "POST /status HTTP/1.1\r\nHost: x\r\nContent-Length: abc\r\n\r\n"))
+            "POST /status HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: abc\r\n\r\n"))
 
     def test_a_json_body_that_is_not_an_object_answers_400(self):
         for route in ("/status", "/act"):
@@ -281,7 +285,7 @@ class Requests(SessionTest):
 
     def test_an_oversized_body_answers_413(self):
         self.assertIn("413", self.raw(
-            "POST /act HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\n\r\n"
+            "POST /act HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: %d\r\n\r\n"
             % (serve.MAX_BODY + 1)))
 
     def test_an_unknown_action_answers_400(self):
@@ -316,6 +320,76 @@ class Requests(SessionTest):
 
     def test_a_traversing_path_answers_404_without_opening_anything(self):
         self.assertEqual(self.get("/../../../etc/passwd")[0], 404)
+
+
+class Forgery(Served):
+    """Binding loopback is not authentication. Both attacks reach a local port
+    from a page the reviewer merely has open, so both are shapes urllib will not
+    send and every one of these goes over a raw socket."""
+
+    def send_raw(self, method, route, headers, body=""):
+        lines = ["%s %s HTTP/1.1" % (method, route)]
+        lines += ["%s: %s" % kv for kv in headers.items()]
+        if body:
+            lines.append("Content-Length: %d" % len(body))
+        return self.raw("\r\n".join(lines) + "\r\n\r\n" + body)
+
+    def act_body(self):
+        return json.dumps({"n": 1, "action": "accept", "note": "not the reviewer"})
+
+    def test_a_rebound_host_cannot_read_the_session(self):
+        """DNS rebinding: the browser sends the name it navigated to, so refusing
+        anything but loopback is what makes the read endpoints unreadable."""
+        for route in ("/", "/state", "/fragment"):
+            with self.subTest(route=route):
+                answer = self.send_raw("GET", route, {"Host": "evil.example.com"})
+                self.assertIn("403", answer)
+
+    def test_a_missing_host_is_refused(self):
+        self.assertIn("403", self.send_raw("GET", "/state", {}))
+
+    def test_the_walk_reads_with_a_loopback_host(self):
+        for host in ("127.0.0.1:%d" % self.port, "localhost:%d" % self.port):
+            with self.subTest(host=host):
+                self.assertIn("200", self.send_raw("GET", "/state", {"Host": host}))
+
+    def test_a_cross_origin_post_cannot_resolve_a_flag(self):
+        """A CORS simple request needs no preflight, so text/parse checks are not a
+        defense; the Origin is what gives it away."""
+        answer = self.send_raw(
+            "POST", "/act",
+            {"Host": "127.0.0.1:%d" % self.port, "Origin": "https://evil.example",
+             "Content-Type": "text/plain;charset=UTF-8"},
+            self.act_body(),
+        )
+        self.assertIn("403", answer)
+        self.assertEqual(self.beat(1)["state"], "flag")
+        self.assertEqual(self.decisions(), [])
+
+    def test_a_cross_origin_post_cannot_spoof_the_status(self):
+        answer = self.send_raw(
+            "POST", "/status",
+            {"Host": "127.0.0.1:%d" % self.port, "Origin": "https://evil.example",
+             "Content-Type": "text/plain"},
+            json.dumps({"phase": "parked", "text": "safe to click"}),
+        )
+        self.assertIn("403", answer)
+        self.assertEqual(self.session.status["phase"], "starting")
+
+    def test_the_page_resolves_a_flag_from_its_own_origin(self):
+        host = "127.0.0.1:%d" % self.port
+        answer = self.send_raw(
+            "POST", "/act",
+            {"Host": host, "Origin": "http://" + host,
+             "Content-Type": "application/json"},
+            self.act_body(),
+        )
+        self.assertIn("200", answer)
+        self.assertEqual(self.beat(1)["state"], "accepted")
+
+    def test_the_walk_acts_with_no_origin_at_all(self):
+        """curl sends none, and the agent drives the same routes the page does."""
+        self.assertEqual(self.post("/act", {"n": 1, "action": "accept"})[0], 200)
 
 
 class Lifecycle(unittest.TestCase):

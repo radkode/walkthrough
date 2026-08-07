@@ -13,7 +13,9 @@ Both directions land on /events, a Server-Sent Events stream, so the page never
 polls. A watcher thread covers writes nobody announced.
 
 Loopback only, and no path is ever taken from a request: every read and write is
-a fixed name inside the session directory.
+a fixed name inside the session directory. Binding loopback is not by itself
+authentication, so requests are checked for the two ways a browser reaches a
+local port from somewhere else: see Handler.forged.
 
 Exit 1  usage error, or the port could not be bound
 """
@@ -65,6 +67,15 @@ MAX_BODY = 64 * 1024
 AWAIT_TIMEOUT = 900.0
 HEARTBEAT = 20.0
 WATCH_INTERVAL = 0.5
+LOOPBACK = {"127.0.0.1", "localhost", "::1", "[::1]"}
+
+
+def host_only(header):
+    """The Host header without its port. A bracketed IPv6 literal keeps its brackets."""
+    value = (header or "").strip()
+    if value.startswith("["):
+        return value.split("]", 1)[0] + "]"
+    return value.split(":", 1)[0]
 
 
 def write_json(path, data):
@@ -224,6 +235,22 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *_args):
         pass  # the terminal belongs to the walk, not to an access log
 
+    def forged(self):
+        """True when a request reached this port from somewhere other than the walk.
+
+        Host, because any name an attacker controls can be rebound to 127.0.0.1, and
+        their page is then same-origin enough to read the diff back out of `/`.
+        Origin, because a page on any other origin can POST here with no preflight,
+        and `/act` writes into the channel the agent takes its instructions from.
+        The page's own origin is always `http://<Host>`, and the walk's curl sends
+        no Origin at all.
+        """
+        host = self.headers.get("Host")
+        if host_only(host) not in LOOPBACK:
+            return True
+        origin = self.headers.get("Origin")
+        return origin is not None and origin != f"http://{host.strip()}"
+
     def send(self, code, body, ctype="application/json"):
         payload = body.encode("utf-8") if isinstance(body, str) else body
         self.send_response(code)
@@ -266,6 +293,8 @@ class Handler(BaseHTTPRequestHandler):
         return int(found.group(1)) if found else default
 
     def do_GET(self):
+        if self.forged():
+            return self.send(403, json.dumps({"error": "not a loopback request"}))
         route = self.route()
         try:
             if route == "/events":
@@ -296,6 +325,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send(404, json.dumps({"error": "no such route"}))
 
     def do_POST(self):
+        if self.forged():
+            # The body is still unread, so this connection cannot be reused.
+            self.close_connection = True
+            return self.send(403, "not a loopback request", "text/plain")
         route = self.route()
         if route not in ("/act", "/status"):
             return self.send(404, json.dumps({"error": "no such route"}))
