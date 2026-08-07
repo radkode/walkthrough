@@ -63,6 +63,16 @@ class BeatValidation(unittest.TestCase):
     def test_accepted_naming_what_it_landed_is_shippable(self):
         self.assertEqual(rr.validate(beat(state="accepted", landed="961eb58")), [])
 
+    def test_landing_something_on_a_beat_nobody_resolved_is_not_shippable(self):
+        """A decision given in words reached no server, so the state never moved. The
+        rule above keys on `accepted` and looked straight past the one path it was
+        built to catch: the fix committed, the beat still an open flag."""
+        problems = rr.validate(beat(
+            state="flag", landed="961eb58",
+            slots={"what": "x", "proof": "a.ts:1", "risk": "r", "fix": "f"},
+        ))
+        self.assertIn("landed 961eb58 but state is 'flag'", problems[0])
+
     def test_review_mode_does_not_demand_a_commit_per_beat(self):
         """Phase 4 renders before it posts, so nothing has landed yet by design."""
         self.assertEqual(rr.validate(beat(state="accepted"), "review"), [])

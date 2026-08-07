@@ -208,8 +208,19 @@ curl -s "$(python3 -c "import json;print(json.load(open('$R/serve.json'))['url']
 terminal accepts the same answers in words, so a closed browser never strands the walk.
 
 **Resolving a flag.** The reviewer accepts or drops it in the same beat, from the page or
-in words. The server has already flipped the beat's `state` and recorded their words as
-`call`, so do not rewrite either.
+in words. A click has already reached the server, which flipped the beat's `state` and
+recorded their words as `call`. An answer in words has reached nothing, so post it
+yourself and let the same code do the same work:
+
+```bash
+curl -s -X POST $URL/act -H 'Content-Type: application/json' \
+  -d '{"n":5,"action":"accept","note":"yes, pin it"}'
+```
+
+The same goes for a note on any beat. The server owns `state` and `call` on both paths, so
+never write either by hand: a beat resolved in words and edited by hand stays `flag` on
+disk, and the Phase 4 check for an accept that landed nothing never fires on it. The reply
+carries the `seq` it recorded, so park past that one rather than re-reading your own action.
 
 On accept, in `branch` mode, where the fix goes depends on whether the PR can still take
 it:
