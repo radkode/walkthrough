@@ -160,19 +160,17 @@ def main():
     args = ap.parse_args()
 
     try:
+        # All three reads take bytes on purpose. Text mode translates a lone \r inside
+        # a line's content to \n, desyncing the hunk before parse_diff ever runs.
         if args.pr:
             diff = subprocess.run(
-                ["gh", "pr", "diff", args.pr],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                check=True,
-            ).stdout
+                ["gh", "pr", "diff", args.pr], capture_output=True, check=True
+            ).stdout.decode("utf-8")
         elif args.diff == "-":
             diff = sys.stdin.buffer.read().decode("utf-8")
         else:
-            with open(args.diff, encoding="utf-8") as fh:
-                diff = fh.read()
+            with open(args.diff, "rb") as fh:
+                diff = fh.read().decode("utf-8")
 
         with open(args.payload, encoding="utf-8") as fh:
             payload = json.load(fh)
