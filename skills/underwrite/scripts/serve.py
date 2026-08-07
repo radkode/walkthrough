@@ -24,9 +24,12 @@ import json
 import os
 import queue
 import re
+import select
 import signal
+import socket
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import ModuleType
@@ -65,6 +68,10 @@ RESOLVE = {"accept": "accepted", "drop": "dropped"}
 ACTIONS = (*RESOLVE, "next", "note", "back", "skip")
 MAX_BODY = 64 * 1024
 AWAIT_TIMEOUT = 900.0
+# A park sleeps in slices so it can notice the client left between them.
+WAIT_SLICE = 5.0
+SOCKET_TIMEOUT = 60.0
+MAX_STATUS_TEXT = 2000
 HEARTBEAT = 20.0
 WATCH_INTERVAL = 0.5
 LOOPBACK = {"127.0.0.1", "localhost", "::1", "[::1]"}
@@ -187,7 +194,7 @@ class Session:
     def set_status(self, status):
         self.status = {
             "phase": (status.get("phase") or "working").strip(),
-            "text": (status.get("text") or "").strip(),
+            "text": (status.get("text") or "").strip()[:MAX_STATUS_TEXT],
         }
         for key in ("beat", "sha"):
             if status.get(key) is not None:
@@ -233,7 +240,7 @@ class Session:
         self.set_status({"phase": "working", "text": f"picking up your {action}"})
         return record
 
-    def wait(self, after, timeout):
+    def wait(self, after, timeout, gone=None):
         """Block until an action newer than `after` lands. None on timeout.
 
         Both edges of the park are published, because whether anyone is here to take
@@ -245,9 +252,17 @@ class Session:
                 return self.tail(after)
             self.waiting += 1
             self.publish()
+            deadline = time.monotonic() + timeout
             try:
-                self.cond.wait(timeout)
-                return self.tail(after) if self.seq > after else None
+                while True:
+                    if gone is not None and gone():
+                        return None
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        return None
+                    self.cond.wait(min(WAIT_SLICE, left))
+                    if self.seq > after:
+                        return self.tail(after)
             finally:
                 self.waiting -= 1
                 self.publish()
@@ -272,6 +287,16 @@ class Session:
 class Handler(BaseHTTPRequestHandler):
     session = None
     protocol_version = "HTTP/1.1"
+    # Without this a half-sent body holds a thread with no deadline at all.
+    timeout = SOCKET_TIMEOUT
+
+    def client_gone(self):
+        """True once the peer has closed. Readable plus a peek of nothing is EOF."""
+        try:
+            ready, _, _ = select.select([self.connection], [], [], 0)
+            return bool(ready) and not self.connection.recv(1, socket.MSG_PEEK)
+        except OSError:
+            return True
 
     def log_message(self, *_args):
         pass  # the terminal belongs to the walk, not to an access log
@@ -357,7 +382,7 @@ class Handler(BaseHTTPRequestHandler):
                     json.dumps({**self.session.snapshot(), "beats": len(beats), "problems": problems}),
                 )
             if route == "/await":
-                found = self.session.wait(self.query("after"), AWAIT_TIMEOUT)
+                found = self.session.wait(self.query("after"), AWAIT_TIMEOUT, self.client_gone)
                 return self.send(200, json.dumps(found or {"timeout": True}))
             if route == "/favicon.ico":
                 return self.send(204, b"", "image/x-icon")
@@ -375,6 +400,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(404, json.dumps({"error": "no such route"}))
         try:
             length = int(self.headers.get("Content-Length") or 0)
+            if length < 0:
+                # read(-1) drains until EOF, so this held a thread for as long as the
+                # client cared to keep the socket open, and then ran the request anyway.
+                raise ValueError("Content-Length must not be negative")
             if length > MAX_BODY:
                 # Nothing reads the body, so this connection cannot be reused: the
                 # next request line would be parsed out of the middle of it.
