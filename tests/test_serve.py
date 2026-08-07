@@ -419,7 +419,31 @@ class Lifecycle(unittest.TestCase):
 
         proc.send_signal(signal.SIGTERM)
         proc.wait(timeout=10)
+        self.assertEqual(proc.returncode, 0)
         self.assertFalse((self.root / "serve.json").exists())
+
+    def test_a_sigterm_racing_startup_still_cleans_up(self):
+        """The handler used to be armed after serve.json was written and the URL
+        printed, so a SIGTERM in that window took the default disposition, exited 143,
+        and left the file behind for the next walk to read and curl. Repeated because
+        the window is small: CI hit it, one local run in forty hit it."""
+        (self.root / "beats").mkdir()
+        (self.root / "session.json").write_text(
+            json.dumps({"repo": "acme/widget"}), encoding="utf-8")
+
+        for attempt in range(6):
+            with self.subTest(attempt=attempt):
+                proc = subprocess.Popen(
+                    [sys.executable, str(SCRIPTS / "serve.py"), str(self.root)],
+                    stdout=subprocess.PIPE, text=True,
+                )
+                self.addCleanup(proc.stdout.close)
+                self.addCleanup(proc.kill)
+                proc.stdout.readline()
+                proc.send_signal(signal.SIGTERM)
+                proc.wait(timeout=10)
+                self.assertEqual(proc.returncode, 0)
+                self.assertFalse((self.root / "serve.json").exists())
 
     def test_a_directory_with_no_session_exits_1(self):
         done = subprocess.run(
