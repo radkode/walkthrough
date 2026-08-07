@@ -252,6 +252,23 @@ class DiffParsing(unittest.TestCase):
         files = va.parse_diff("+++ b/x.py\n@@ -1 +1 @@\n+x\n\\ No newline at end of file\n")
         self.assertEqual(files["x.py"]["RIGHT"], {1})
 
+    def test_a_separator_inside_a_line_does_not_end_it(self):
+        """splitlines() breaks on nine separators beyond \\n, and one of them inside a
+        line's content shattered the line and desynced the rest of the hunk. U+2028 is
+        routine in minified JS, form feed in Emacs-formatted sources, bare CR in files
+        with mixed endings."""
+        for sep in ("\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+            with self.subTest(sep=sep):
+                files = va.parse_diff(
+                    "+++ b/x.py\n@@ -0,0 +1,3 @@\n+a%sb\n+second\n+third\n" % sep
+                )
+                self.assertEqual(files["x.py"]["RIGHT"], {1, 2, 3})
+
+    def test_a_crlf_diff_parses_and_keeps_the_path_clean(self):
+        files = va.parse_diff("--- a/x.py\r\n+++ b/x.py\r\n@@ -1 +1 @@\r\n-old\r\n+new\r\n")
+        self.assertEqual(sorted(files), ["x.py"])
+        self.assertEqual(files["x.py"]["RIGHT"], {1})
+
     def test_several_files_stay_separate(self):
         files = va.parse_diff(
             "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+a\n"
@@ -367,6 +384,21 @@ class AnchorValidation(unittest.TestCase):
                    "comments": [{"path": "new.py", "line": 1, "side": "LEFT", "body": "n"}]}
         report = va.validate(payload, files)
         self.assertIn("no LEFT lines", report[0])
+
+    def test_a_separator_in_the_content_no_longer_moves_a_comment(self):
+        """The desync was silent, so the anchor did not fail: it fell through to snap()
+        and the note about `export default KEY` got posted on the line two above it."""
+        diff = (
+            "+++ b/web/app.js\n@@ -40,0 +41,3 @@\n"
+            '+const TIP = "press\u2028enter";\n'
+            "+const KEY = process.env.SECRET;\n"
+            "+export default KEY;\n"
+        )
+        payload = {"body": "", "event": "COMMENT", "comments": [
+            {"path": "web/app.js", "line": 43, "side": "RIGHT", "body": "exports a secret"}]}
+        report = va.validate(payload, va.parse_diff(diff))
+        self.assertEqual(report, [])
+        self.assertEqual(payload["comments"][0]["line"], 43)
 
     def test_a_non_integer_line_is_folded_rather_than_crashing(self):
         payload, report = self.run_on([{"path": "x.py", "line": None, "side": "RIGHT", "body": "n"}])

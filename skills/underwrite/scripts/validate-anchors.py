@@ -41,7 +41,14 @@ def parse_diff(text):
     files, path, was = {}, None, None
     old_ln = new_ln = rem_old = rem_new = 0
 
-    for line in text.splitlines():
+    # Only \n ends a diff line. splitlines() also breaks on \r, \v, \f, \x1c-\x1e,
+    # \x85 and U+2028-9, any of which shatters a line whose content carries one.
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+
+    for line in lines:
+        line = line.rstrip("\r")
         # Inside a hunk, consume by the header's line counts. Counting rather than
         # pattern-matching keeps an added line of "++ x" from looking like a header.
         if rem_old > 0 or rem_new > 0:
