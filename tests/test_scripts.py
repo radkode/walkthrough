@@ -146,6 +146,22 @@ class ProofEvidence(unittest.TestCase):
     def test_inferred_with_a_reason_is_legal(self):
         self.assertEqual(self.proof("inferred from the surrounding call sites"), [])
 
+    def test_a_file_with_no_extension_counts(self):
+        """Requiring a dot before the colon made these unproven, and they are ordinary
+        review targets."""
+        for path in ("Makefile:12", "Dockerfile:3", "CODEOWNERS:8", ".env:2"):
+            with self.subTest(path=path):
+                self.assertEqual(self.proof("%s pins it" % path), [])
+
+    def test_a_clock_time_is_still_not_a_path(self):
+        self.assertIn("names no command", self.proof("we met at 10:30 and agreed")[0])
+
+    def test_a_proof_that_is_not_text_is_reported_not_raised(self):
+        """Searching a number threw TypeError past main(), so the one step whose
+        docstring promises never to fail did exactly that."""
+        problems = self.proof(1426)
+        self.assertIn("proof is int, not text", problems[0])
+
 
 class ReportOrdering(unittest.TestCase):
     """The page is ordered by what is owed, not by beat number."""
@@ -187,6 +203,17 @@ class ReportOrdering(unittest.TestCase):
     def test_unverified_beats_count_as_clean_in_the_tiles(self):
         html = self.render([beat(n=1, state="clean"), beat(n=2, state="unverified")])
         self.assertRegex(html, r'<div class="count is-clean"[^>]*>\s*<span class="n">2</span>')
+
+    def test_a_beat_with_an_unplaceable_state_is_shown_not_dropped(self):
+        """It matched no section and rendered nowhere, while still counting in the
+        tiles: the page said four beats walked and showed three."""
+        html = self.render([beat(n=1, state="clean"), beat(n=2, state="typoed")])
+        self.assertIn("Unplaced", html)
+        self.assertIn('data-n="2"', html)
+        self.assertRegex(html, r'<div class="count is-mute"[^>]*>\s*<span class="n">2</span>')
+
+    def test_no_unplaced_section_when_every_state_is_known(self):
+        self.assertNotIn("Unplaced", self.render([beat(n=1, state="clean")]))
 
     def test_a_failing_beat_carries_the_unproven_chip(self):
         html = rr.render({"repo": "r"}, [beat(n=1)], "", {1: ["beat 1: no what"]})
