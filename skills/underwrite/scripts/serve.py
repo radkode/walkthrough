@@ -398,14 +398,18 @@ def main():
         sys.exit(f"serve: {err}")
     httpd.daemon_threads = True
 
-    url = f"http://127.0.0.1:{httpd.server_address[1]}"
-    (root / "serve.json").write_text(
-        json.dumps({"url": url, "pid": os.getpid()}, indent=2) + "\n", encoding="utf-8"
-    )
-    print(url, flush=True)
-
+    # Armed before serve.json exists, and the write is inside the try, so there is no
+    # instant where the file is on disk and the handler that removes it is not installed.
+    # A SIGTERM in that window took the default disposition, and the walk that follows
+    # reads the stale file and curls a URL nobody is serving.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+
+    url = f"http://127.0.0.1:{httpd.server_address[1]}"
     try:
+        (root / "serve.json").write_text(
+            json.dumps({"url": url, "pid": os.getpid()}, indent=2) + "\n", encoding="utf-8"
+        )
+        print(url, flush=True)
         httpd.serve_forever()
     except (KeyboardInterrupt, SystemExit):
         pass
