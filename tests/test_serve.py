@@ -209,6 +209,35 @@ class Parking(SessionTest):
         self.assertIsNone(session.wait(1, 0.2))
         self.assertGreaterEqual(time.monotonic() - started, 0.2)
 
+    def test_nobody_parked_means_nobody_is_listening(self):
+        self.assertFalse(self.session.snapshot()["listening"])
+
+    def test_a_parked_caller_is_visible_to_the_page(self):
+        """The page used to infer this from the agent's own status text, which an agent
+        that died mid-walk leaves standing, so a click went nowhere and looked broken."""
+        seen = []
+        waiter = threading.Thread(target=lambda: self.session.wait(0, 5.0))
+        waiter.start()
+        for _ in range(100):
+            if self.session.snapshot()["listening"]:
+                seen.append(True)
+                break
+            time.sleep(0.01)
+        self.session.act(None, "next", "")
+        waiter.join(5.0)
+        self.assertEqual(seen, [True])
+        self.assertFalse(self.session.snapshot()["listening"])
+
+    def test_a_park_that_times_out_stops_listening(self):
+        self.session.wait(0, 0.05)
+        self.assertFalse(self.session.snapshot()["listening"])
+
+    def test_an_already_satisfied_park_never_claims_to_listen(self):
+        """seq is already ahead, so wait returns without parking at all."""
+        self.session.act(None, "next", "")
+        self.assertIsNotNone(self.session.wait(0, 5.0))
+        self.assertFalse(self.session.snapshot()["listening"])
+
     def test_it_wakes_as_soon_as_someone_acts(self):
         woke = []
         waiter = threading.Thread(target=lambda: woke.append(self.session.wait(0, 5.0)))

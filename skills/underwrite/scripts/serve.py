@@ -107,6 +107,7 @@ class Session:
         self.subscribers = []
         self.status = {"phase": "starting", "text": "waiting for the walk to begin"}
         self.stop = threading.Event()
+        self.waiting = 0
         self.seq = max((r.get("seq", 0) for r in self.records()), default=0)
 
     def records(self):
@@ -137,7 +138,14 @@ class Session:
     # ---- pub/sub -------------------------------------------------------
 
     def snapshot(self):
-        return {"rev": self.fingerprint(), "seq": self.seq, "status": self.status}
+        # `listening` is the half `status` cannot tell you: status is whatever the agent
+        # last said, and an agent that died mid-walk leaves its last word standing.
+        return {
+            "rev": self.fingerprint(),
+            "seq": self.seq,
+            "status": self.status,
+            "listening": self.waiting > 0,
+        }
 
     def subscribe(self):
         channel = queue.Queue()
@@ -204,12 +212,23 @@ class Session:
         return record
 
     def wait(self, after, timeout):
-        """Block until an action newer than `after` lands. None on timeout."""
+        """Block until an action newer than `after` lands. None on timeout.
+
+        Both edges of the park are published, because whether anyone is here to take
+        the next call is the one thing the page cannot infer from the files. The count
+        is kept under `cond` rather than `lock`, which is the documented order.
+        """
         with self.cond:
             if self.seq > after:
                 return self.tail(after)
-            self.cond.wait(timeout)
-            return self.tail(after) if self.seq > after else None
+            self.waiting += 1
+            self.publish()
+            try:
+                self.cond.wait(timeout)
+                return self.tail(after) if self.seq > after else None
+            finally:
+                self.waiting -= 1
+                self.publish()
 
     def tail(self, after):
         newer = [r for r in self.records() if r.get("seq", 0) > after]
