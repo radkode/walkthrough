@@ -30,6 +30,7 @@ import socket
 import sys
 import threading
 import time
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import ModuleType
@@ -449,6 +450,25 @@ class Usage(argparse.ArgumentParser):
         sys.exit(f"serve: {message}")
 
 
+def already_serving(root):
+    """The URL of a server already answering for this session, or None.
+
+    Two servers on one directory is the cross-process version of the race `act` takes
+    a lock to prevent: both accept a racing accept and drop, and both write a record
+    numbered seq 1. Neither can see the other's state, so the lock cannot help.
+
+    The proof has to be an answer, not the file and not the pid in it. A SIGKILL
+    leaves serve.json behind and a pid can be inherited by something unrelated, and a
+    walk that cannot start because of a stale file is the worse failure of the two.
+    """
+    try:
+        url = json.loads((root / "serve.json").read_text(encoding="utf-8"))["url"]
+        with urllib.request.urlopen(url + "/state", timeout=1) as answer:
+            return url if "rev" in json.loads(answer.read()) else None
+    except (OSError, ValueError, KeyError):
+        return None
+
+
 def main():
     ap = Usage(description="Serve an underwrite session.")
     ap.add_argument("session_dir", help="directory holding session.json and beats/")
@@ -459,6 +479,12 @@ def main():
     root = Path(args.session_dir).expanduser()
     if not (root / "session.json").exists():
         sys.exit(f"serve: no session.json in {root}")
+
+    # Before anything is bound or written, so refusing leaves the running server's
+    # serve.json exactly as it found it.
+    running = already_serving(root)
+    if running:
+        sys.exit(f"serve: this session is already being served at {running}")
 
     css_path = Path(args.css).expanduser() if args.css else rr().default_css()
     Handler.session = Session(root, css_path)

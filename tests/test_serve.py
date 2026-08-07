@@ -884,5 +884,79 @@ class Lifecycle(unittest.TestCase):
         self.assertIn("serve:", done.stderr)
 
 
+class OneServerPerSession(unittest.TestCase):
+    """Two live servers on one directory both answered a racing accept and drop, and
+    both wrote a record numbered seq 1. It is the race `act` holds a lock to prevent,
+    happening across processes where a lock cannot reach."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root, True)
+        (self.root / "beats").mkdir()
+        (self.root / "session.json").write_text(
+            json.dumps({"repo": "acme/widget"}), encoding="utf-8")
+
+    def start(self):
+        proc = subprocess.Popen(
+            [sys.executable, str(SCRIPTS / "serve.py"), str(self.root)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        # Reversed, so it reads as kill then reap. Killing alone leaves a zombie and
+        # the whole suite runs under -W error::ResourceWarning.
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.stdout.close)
+        self.addCleanup(proc.stderr.close)
+        self.addCleanup(proc.kill)
+        return proc
+
+    def second(self):
+        """A second start, run to completion. One that does not refuse serves forever,
+        so the timeout stands in for the assertion rather than hanging the suite."""
+        try:
+            return subprocess.run(
+                [sys.executable, str(SCRIPTS / "serve.py"), str(self.root)],
+                capture_output=True, text=True, timeout=15,
+            )
+        except subprocess.TimeoutExpired:
+            self.fail("the second server did not refuse, it started serving")
+
+    def test_a_second_start_refuses_and_names_the_one_already_running(self):
+        url = self.start().stdout.readline().strip()
+        done = self.second()
+        self.assertEqual(done.returncode, 1)
+        self.assertIn(url, done.stderr)
+
+    def test_the_running_server_is_left_exactly_as_it_was(self):
+        """The refusing process shares the directory, so cleaning up on its way out
+        would take the live server's URL down with it."""
+        url = self.start().stdout.readline().strip()
+        self.second()
+        served = json.loads((self.root / "serve.json").read_text(encoding="utf-8"))
+        self.assertEqual(served["url"], url)
+        with urllib.request.urlopen(url + "/state", timeout=5) as answer:
+            self.assertEqual(answer.status, 200)
+
+    def test_a_serve_json_left_behind_by_a_kill_does_not_block_the_next_walk(self):
+        """SIGKILL runs no cleanup, so the file outlives the server. Refusing on the
+        file alone would strand the session it exists to describe."""
+        first = self.start()
+        first.stdout.readline()
+        first.kill()
+        first.wait(timeout=10)
+        self.assertTrue((self.root / "serve.json").exists())
+        self.assertTrue(self.start().stdout.readline().startswith("http://127.0.0.1:"))
+
+    def test_a_serve_json_that_will_not_parse_does_not_block_a_start(self):
+        (self.root / "serve.json").write_text("{ half written", encoding="utf-8")
+        self.assertTrue(self.start().stdout.readline().startswith("http://127.0.0.1:"))
+
+    def test_a_url_nobody_answers_does_not_block_a_start(self):
+        """A pid outlives the process that owned it and can be handed to something
+        unrelated, which is why the proof is an answer and not a pid."""
+        (self.root / "serve.json").write_text(
+            json.dumps({"url": "http://127.0.0.1:9", "pid": os.getpid()}), encoding="utf-8")
+        self.assertTrue(self.start().stdout.readline().startswith("http://127.0.0.1:"))
+
+
 if __name__ == "__main__":
     unittest.main()
