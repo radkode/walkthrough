@@ -8,6 +8,10 @@ the report puts beats in, how a unified diff maps to anchorable lines, and
 what happens to an anchor that does not land on one.
 """
 import importlib.util
+import json
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -252,6 +256,31 @@ class DiffParsing(unittest.TestCase):
         files = va.parse_diff("+++ b/x.py\n@@ -1 +1 @@\n+x\n\\ No newline at end of file\n")
         self.assertEqual(files["x.py"]["RIGHT"], {1})
 
+    def test_a_separator_inside_a_line_does_not_end_it(self):
+        """splitlines() breaks on nine separators beyond \\n, and one of them inside a
+        line's content shattered the line and desynced the rest of the hunk. U+2028 is
+        routine in minified JS and form feed in Emacs-formatted sources. The \\r case
+        needs the reader to be byte-faithful too, which DiffReading covers."""
+        for sep in ("\r", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+            with self.subTest(sep=sep):
+                files = va.parse_diff(
+                    "+++ b/x.py\n@@ -0,0 +1,3 @@\n+a%sb\n+second\n+third\n" % sep
+                )
+                self.assertEqual(files["x.py"]["RIGHT"], {1, 2, 3})
+
+    def test_a_crlf_diff_parses_and_keeps_the_path_clean(self):
+        files = va.parse_diff("--- a/x.py\r\n+++ b/x.py\r\n@@ -1 +1 @@\r\n-old\r\n+new\r\n")
+        self.assertEqual(sorted(files), ["x.py"])
+        self.assertEqual(files["x.py"]["RIGHT"], {1})
+
+    def test_a_crlf_blank_context_line_still_counts(self):
+        """A blank context line in a CRLF diff arrives as a bare \\r. Without the strip
+        it matches no tag, hits the resync arm, and the rest of the hunk is dropped."""
+        files = va.parse_diff(
+            "--- a/x.py\r\n+++ b/x.py\r\n@@ -1,4 +1,4 @@\r\n a\r\n\r\n-c\r\n+d\r\n e\r\n"
+        )
+        self.assertEqual(files["x.py"]["RIGHT"], {1, 2, 3, 4})
+
     def test_several_files_stay_separate(self):
         files = va.parse_diff(
             "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+a\n"
@@ -259,6 +288,56 @@ class DiffParsing(unittest.TestCase):
         )
         self.assertEqual(files["a.py"]["RIGHT"], {1})
         self.assertEqual(files["b.py"]["RIGHT"], {7})
+
+
+class DiffReading(unittest.TestCase):
+    """Whatever parse_diff does with a separator is moot if the read already ate it.
+    Text mode turns a lone \\r into \\n, so the in-process tests above passed while the
+    documented invocation, --diff on a file, still moved the anchor."""
+
+    CR = (
+        b"+++ b/web/app.js\n@@ -40,0 +41,3 @@\n"
+        b'+const TIP = "press\renter";\n'
+        b"+const KEY = process.env.SECRET;\n"
+        b"+export default KEY;\n"
+    )
+
+    def run_cli(self, diff_bytes, line):
+        """Run the script the way Phase 4 does. Returns (exit code, fixed payload)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / "pr.diff").write_bytes(diff_bytes)
+            (tmp / "payload.json").write_text(
+                json.dumps({"body": "", "event": "COMMENT", "comments": [
+                    {"path": "web/app.js", "line": line, "side": "RIGHT", "body": "n"}]}),
+                encoding="utf-8",
+            )
+            done = subprocess.run(
+                [sys.executable, str(SCRIPTS / "validate-anchors.py"),
+                 "--diff", str(tmp / "pr.diff"),
+                 "--payload", str(tmp / "payload.json"),
+                 "--out", str(tmp / "fixed.json")],
+                capture_output=True, text=True,
+            )
+            return done.returncode, json.loads(
+                (tmp / "fixed.json").read_text(encoding="utf-8")
+            )
+
+    def test_a_bare_cr_read_from_a_file_does_not_move_the_anchor(self):
+        code, payload = self.run_cli(self.CR, 43)
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["comments"][0]["line"], 43)
+
+    def test_a_clean_diff_still_validates_through_the_cli(self):
+        code, payload = self.run_cli(self.CR.replace(b"\r", b""), 43)
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["comments"][0]["line"], 43)
+
+    def test_an_anchor_outside_the_diff_still_exits_2(self):
+        """The exit code Phase 4 branches on, pinned through the real entry point."""
+        code, payload = self.run_cli(self.CR, 900)
+        self.assertEqual(code, 2)
+        self.assertEqual(payload["comments"], [])
 
 
 class Snapping(unittest.TestCase):
@@ -367,6 +446,21 @@ class AnchorValidation(unittest.TestCase):
                    "comments": [{"path": "new.py", "line": 1, "side": "LEFT", "body": "n"}]}
         report = va.validate(payload, files)
         self.assertIn("no LEFT lines", report[0])
+
+    def test_a_separator_in_the_content_no_longer_moves_a_comment(self):
+        """The desync was silent, so the anchor did not fail: it fell through to snap()
+        and the note about `export default KEY` got posted on the line two above it."""
+        diff = (
+            "+++ b/web/app.js\n@@ -40,0 +41,3 @@\n"
+            '+const TIP = "press\u2028enter";\n'
+            "+const KEY = process.env.SECRET;\n"
+            "+export default KEY;\n"
+        )
+        payload = {"body": "", "event": "COMMENT", "comments": [
+            {"path": "web/app.js", "line": 43, "side": "RIGHT", "body": "exports a secret"}]}
+        report = va.validate(payload, va.parse_diff(diff))
+        self.assertEqual(report, [])
+        self.assertEqual(payload["comments"][0]["line"], 43)
 
     def test_a_non_integer_line_is_folded_rather_than_crashing(self):
         payload, report = self.run_on([{"path": "x.py", "line": None, "side": "RIGHT", "body": "n"}])
