@@ -428,8 +428,29 @@ class Handler(BaseHTTPRequestHandler):
         self.send(200, json.dumps(record))
 
 
+class Server(ThreadingHTTPServer):
+    """The same terminal rule as log_message, applied to the connection layer."""
+
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        # A reviewer closing the tab, or a park whose page went away, arrives here as
+        # a reset or a timeout, and the default handler prints a full traceback into
+        # the terminal the walk is reading. Neither is an error anyone can act on.
+        if not isinstance(sys.exc_info()[1], (ConnectionError, socket.timeout)):
+            super().handle_error(request, client_address)
+
+
+class Usage(argparse.ArgumentParser):
+    """argparse exits 2 on a usage error, and every script here spends 2 on something
+    the caller is meant to keep going after. Usage errors exit 1, as documented."""
+
+    def error(self, message):
+        sys.exit(f"serve: {message}")
+
+
 def main():
-    ap = argparse.ArgumentParser(description="Serve an underwrite session.")
+    ap = Usage(description="Serve an underwrite session.")
     ap.add_argument("session_dir", help="directory holding session.json and beats/")
     ap.add_argument("--port", type=int, default=0, help="default 0, an ephemeral port")
     ap.add_argument("--css", help="override assets/report.css")
@@ -444,10 +465,9 @@ def main():
     threading.Thread(target=Handler.session.watch, daemon=True).start()
 
     try:
-        httpd = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+        httpd = Server(("127.0.0.1", args.port), Handler)
     except OSError as err:
         sys.exit(f"serve: {err}")
-    httpd.daemon_threads = True
 
     # Armed before serve.json exists, and the write is inside the try, so there is no
     # instant where the file is on disk and the handler that removes it is not installed.
