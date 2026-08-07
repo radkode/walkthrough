@@ -250,6 +250,42 @@ class Parking(SessionTest):
 
 
 
+class LettingGo(SessionTest):
+    """A park used to hold its slot for the full 900s after the client vanished, so
+    `listening` lied and one packet bought a thread for a quarter of an hour."""
+
+    def test_a_park_ends_when_the_client_is_gone(self):
+        started = time.monotonic()
+        self.assertIsNone(self.session.wait(0, 30.0, gone=lambda: True))
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_it_stops_listening_once_the_client_is_gone(self):
+        self.session.wait(0, 30.0, gone=lambda: True)
+        self.assertFalse(self.session.snapshot()["listening"])
+
+    def test_a_live_client_still_waits_the_whole_timeout(self):
+        started = time.monotonic()
+        self.assertIsNone(self.session.wait(0, 0.3, gone=lambda: False))
+        self.assertGreaterEqual(time.monotonic() - started, 0.3)
+
+    def test_an_action_still_wins_over_the_liveness_check(self):
+        woke = []
+        waiter = threading.Thread(
+            target=lambda: woke.append(self.session.wait(0, 30.0, gone=lambda: False)))
+        waiter.start()
+        time.sleep(0.05)
+        self.session.act(None, "next", "")
+        waiter.join(10.0)
+        self.assertEqual(woke[0]["action"], "next")
+
+
+class StatusSize(SessionTest):
+    def test_a_long_status_text_is_capped(self):
+        """Every subscriber keeps a copy of each event in an unbounded queue."""
+        stored = self.session.set_status({"phase": "working", "text": "x" * 60000})
+        self.assertEqual(len(stored["text"]), serve.MAX_STATUS_TEXT)
+
+
 class ATornLog(SessionTest):
     """ENOSPC or a power loss during the append leaves a half-written last line.
     Refusing to parse it stranded the session the log exists to preserve."""
@@ -351,6 +387,12 @@ class Requests(Served):
         for route in ("/status", "/act"):
             with self.subTest(route=route):
                 self.assertEqual(self.post(route, [])[0], 400)
+
+    def test_a_negative_content_length_answers_400(self):
+        """It slipped past a ceiling-only guard, and read(-1) then drained until the
+        client felt like closing, after which the request ran anyway."""
+        self.assertIn("400", self.raw(
+            "POST /status HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: -1\r\n\r\n"))
 
     def test_an_oversized_body_answers_413(self):
         self.assertIn("413", self.raw(
