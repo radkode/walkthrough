@@ -85,7 +85,8 @@ presents beat 6    ------>   beat 6 arrives
 ```
 
 The server is loopback-only and takes no path from any request: every read and write is a
-fixed name inside the session directory.
+fixed name inside the session directory. Loopback is not authentication on its own, so it
+also refuses a request whose Host is not loopback, or whose Origin is not the page's own.
 
 ## Session state
 
