@@ -47,7 +47,9 @@ LANDS_TAG = {"landed": "Landed", "ready": "Ready", "open": "Your call"}
 
 # proof has to point at something a reader can re-run or open, or say up front
 # that it does not. "inferred" is the documented honest answer, not a failure.
-PROOF_EVIDENCE = re.compile(r"`[^`]+`|\b[\w./-]+\.\w+:\d+|^inferred\b")
+# The path arm wants a letter rather than a dot: requiring an extension turned
+# Makefile:12 and CODEOWNERS:8 into unproven, and a letter still keeps 10:30 out.
+PROOF_EVIDENCE = re.compile(r"`[^`]+`|\b[\w./-]*[A-Za-z][\w./-]*:\d+|^inferred\b")
 
 # Only for --standalone. The viewport tag is load-bearing: report.css has a
 # 620px breakpoint that never fires without it.
@@ -192,7 +194,11 @@ def validate(beat, mode="branch"):
             if not slots.get(key):
                 problems.append(f"beat {n}: flag with no {key}")
     proof = slots.get("proof")
-    if proof and not PROOF_EVIDENCE.search(proof):
+    if proof and not isinstance(proof, str):
+        # Reported rather than raised: searching a number threw TypeError straight
+        # past main(), so the one step that promises never to fail did.
+        problems.append(f"beat {n}: proof is {type(proof).__name__}, not text")
+    elif proof and not PROOF_EVIDENCE.search(proof):
         problems.append(f"beat {n}: proof names no command or path:line")
     return problems
 
@@ -287,8 +293,17 @@ def body_html(session, beats, problems_by_n, live=False):
         + "</div>"
     ]
 
-    for heading, hint, states, expanded in SECTIONS:
-        picked = [b for b in beats if b.get("state") in states]
+    # A state outside the five matches no section, and a beat that matches no section
+    # used to render nowhere while still counting in the tiles. The page exists to say
+    # what is owed, so an unplaceable beat is shown, not dropped.
+    placed = {state for _h, _t, states, _e in SECTIONS for state in states}
+    sections = (*SECTIONS, ("Unplaced", "state is not one of the five", None, True))
+
+    for heading, hint, states, expanded in sections:
+        if states is None:
+            picked = [b for b in beats if b.get("state") not in placed]
+        else:
+            picked = [b for b in beats if b.get("state") in states]
         if not picked:
             continue
         cards = "".join(
