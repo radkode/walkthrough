@@ -248,6 +248,46 @@ class Parking(SessionTest):
         self.assertEqual(woke[0]["action"], "next")
 
 
+
+
+class ATornLog(SessionTest):
+    """ENOSPC or a power loss during the append leaves a half-written last line.
+    Refusing to parse it stranded the session the log exists to preserve."""
+
+    TORN = '{"seq": 1, "n": null, "action": "next", "note": ""}\n{"seq": 2, "n'
+
+    def tear(self):
+        (self.root / "decisions.jsonl").write_text(self.TORN, encoding="utf-8")
+
+    def test_the_readable_records_still_load(self):
+        self.tear()
+        session = self.open_session()
+        self.assertEqual([r["seq"] for r in session.records()], [1])
+        self.assertEqual(session.seq, 1)
+
+    def test_a_park_answers_instead_of_raising(self):
+        """A live server used to answer every /await with a 500 once this landed."""
+        self.tear()
+        session = self.open_session()
+        self.assertIsNone(session.wait(1, 0.05))
+
+    def test_the_next_decision_does_not_fuse_onto_it(self):
+        """The torn line stays where it is. What matters is that the next record gets
+        a line of its own, rather than being appended onto the stump and lost too."""
+        self.tear()
+        session = self.open_session()
+        session.act(None, "next", "")
+        self.assertEqual([r["seq"] for r in session.records()], [1, 2])
+        lines = (self.root / "decisions.jsonl").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(lines[1], '{"seq": 2, "n')
+        self.assertEqual(json.loads(lines[2])["seq"], 2)
+
+    def test_a_log_ending_cleanly_gains_no_blank_line(self):
+        session = self.open_session()
+        session.act(None, "next", "")
+        session.act(None, "next", "")
+        self.assertNotIn(
+            "\n\n", (self.root / "decisions.jsonl").read_text(encoding="utf-8"))
 class Served(SessionTest):
     """A live server on an ephemeral port, plus the three ways to talk to it."""
 
