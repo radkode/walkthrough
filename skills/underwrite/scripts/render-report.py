@@ -147,6 +147,13 @@ LIVE_JS = """<script>
 </script>"""
 
 
+def attr(value):
+    """Escape for attribute position, quotes included. `md` deliberately leaves them
+    alone so its `<code>` output reads right in a text node, which makes it exactly
+    the wrong helper here."""
+    return html.escape(str(value), quote=True)
+
+
 def md(text):
     """Escape, then let backticks become <code>. No HTML passthrough."""
     out = html.escape(str(text), quote=False)
@@ -239,15 +246,15 @@ def beat_html(beat, problems, expanded, live=False):
         )
         placeholder = "or put it in your own words" if flag else "note this for the record"
         body.append(
-            f'<div class="acts" data-acts="{n}">{controls}'
-            f'<input class="note" aria-label="your words, beat {n}" placeholder="{placeholder}">'
+            f'<div class="acts" data-acts="{attr(n)}">{controls}'
+            f'<input class="note" aria-label="your words, beat {attr(n)}" placeholder="{placeholder}">'
             f'<span class="act-msg"></span></div>'
         )
 
     return (
-        f'<details class="beat s-{suffix}" data-n="{n}"{" open" if expanded else ""}>'
+        f'<details class="beat s-{suffix}" data-n="{attr(n)}"{" open" if expanded else ""}>'
         f"<summary>"
-        f'<span class="b-num">{n}</span>'
+        f'<span class="b-num">{md(n)}</span>'
         f'<span class="b-tier">{md(beat.get("tier", ""))}</span>'
         f'<span class="b-claim"><span class="state">{token}</span> &nbsp;'
         f'{md(beat.get("claim", ""))}{chip}</span>'
@@ -294,7 +301,7 @@ def body_html(session, beats, problems_by_n, live=False):
 
     if session.get("lands"):
         rows = "".join(
-            f'<div class="next-row {l.get("state", "open")}">'
+            f'<div class="next-row {attr(l.get("state", "open"))}">'
             f'<span class="tag">{LANDS_TAG.get(l.get("state"), "Your call")}</span>'
             f'<span class="what">{md(l.get("what", ""))}</span>'
             f'<span class="where">{md(l.get("where", ""))}</span></div>'
@@ -321,7 +328,7 @@ def render(session, beats, css, problems_by_n, live=False):
         f'<span>{md(session.get("repo", ""))}</span>',
     ]
     if number:
-        parts.append(f'<span class="sep">/</span><span>pull/{number}</span>')
+        parts.append(f'<span class="sep">/</span><span>pull/{md(number)}</span>')
     parts.append('<span class="sep">·</span><span>underwrite</span>')
     if session.get("date"):
         parts.append(f'<span class="sep">·</span><span>{md(session["date"])}</span>')
