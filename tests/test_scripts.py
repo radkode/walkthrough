@@ -232,6 +232,33 @@ class Escaping(unittest.TestCase):
     def test_ampersands_are_escaped(self):
         self.assertEqual(rr.md("a && b"), "a &amp;&amp; b")
 
+    def test_md_leaves_quotes_alone_which_is_why_attributes_need_attr(self):
+        self.assertEqual(rr.md('say "hi"'), 'say "hi"')
+        self.assertEqual(rr.attr('say "hi"'), "say &quot;hi&quot;")
+
+    def test_a_beat_number_cannot_break_out_of_its_attributes(self):
+        """`n` is agent-written bookkeeping, but it went raw into three attributes and
+        one text node while everything beside it was escaped."""
+        html = rr.render(
+            {"repo": "r"},
+            [beat(n='2"><img src=x onerror=alert(9)>')],
+            "", {}, live=True,
+        )
+        self.assertNotIn("<img", html)
+        self.assertIn("&lt;img", html)
+
+    def test_a_lands_state_cannot_add_an_event_handler(self):
+        html = rr.render(
+            {"repo": "r", "lands": [{"state": 'open" onmouseover="alert(1)', "what": "x"}]},
+            [], "", {},
+        )
+        self.assertNotIn('onmouseover="alert(1)"', html)
+
+    def test_the_pr_number_is_escaped_everywhere_it_appears(self):
+        """It was escaped in the title and the h1 and raw in the eyebrow."""
+        html = rr.render({"repo": "r", "number": "1</span><script>alert(1)</script>"}, [], "", {})
+        self.assertNotIn("<script>", html)
+
 
 class DiffParsing(unittest.TestCase):
     def test_maps_added_and_context_lines_to_sides(self):

@@ -78,6 +78,16 @@ def host_only(header):
     return value.split(":", 1)[0]
 
 
+def ends_mid_line(path):
+    """True when the last append never finished, so the log has no closing newline."""
+    try:
+        with path.open("rb") as fh:
+            fh.seek(-1, os.SEEK_END)
+            return fh.read(1) != b"\n"
+    except OSError:
+        return False  # missing or empty, so there is nothing to run into
+
+
 def write_json(path, data):
     """Write through a temp sibling, so a reader never sees a half-written beat.
 
@@ -111,19 +121,28 @@ class Session:
         self.seq = max((r.get("seq", 0) for r in self.records()), default=0)
 
     def records(self):
-        """Every decision on disk.
+        """Every decision on disk that still reads as one.
 
         seq comes from the records, never from a line count: a single blank line in
         the log would put seq ahead of the highest record, and every /await would
         then answer instantly with a timeout while the agent parked again.
+
+        A half-written trailing line is what ENOSPC or a power loss during the append
+        leaves behind, and refusing to parse it stranded the whole session: the server
+        would not start, and a live one answered every /await with a 500. One lost
+        decision is the smaller harm.
         """
         if not self.decisions.exists():
             return []
-        return [
-            json.loads(line)
-            for line in self.decisions.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        out = []
+        for line in self.decisions.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return out
 
     def load(self):
         return rr().load(self.root, self.css_path)
@@ -204,8 +223,11 @@ class Session:
             # already bumped it would leave every later /await unable to match.
             seq = self.seq + 1
             record = {"seq": seq, "n": n, "action": action, "note": note}
+            # Start a line of our own when the previous append was cut short, or the
+            # two fuse into one line that parses as neither and both are lost.
+            opener = "\n" if ends_mid_line(self.decisions) else ""
             with self.decisions.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(record) + "\n")
+                fh.write(opener + json.dumps(record) + "\n")
             self.seq = seq
             self.cond.notify_all()
         self.set_status({"phase": "working", "text": f"picking up your {action}"})
