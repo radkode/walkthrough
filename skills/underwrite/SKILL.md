@@ -206,9 +206,10 @@ curl -s "$(python3 -c "import json;print(json.load(open('$R/serve.json'))['url']
 resumed one at the `seq` that `GET /state` reports, because everything at or below it
 belongs to the previous sitting: `decisions.jsonl` outlives the server, so parking at 0
 on a resume hands you that sitting's first action back as though it were fresh. The reply is
-`{seq, n, action, note}` where action is `accept`, `drop`, `note`, `next`, `back`, or
-`skip`. A reply of `{"timeout": true}` means nobody acted; say so and park again. The
-terminal accepts the same answers in words, so a closed browser never strands the walk.
+`{seq, n, action, note}` where action is `accept`, `drop`, `decide`, `note`, `next`,
+`back`, or `skip`. A reply of `{"timeout": true}` means nobody acted; say so and park
+again. The terminal accepts the same answers in words, so a closed browser never strands
+the walk.
 
 **Resolving a flag.** The reviewer accepts or drops it in the same beat, from the page or
 in words. A click has already reached the server, which flipped the beat's `state` and
@@ -253,9 +254,22 @@ If verification fails, do not commit and do not set `landed`. Rewrite the `FIX` 
 what is now owed, say so, and stop. Phase 4 will refuse to render an accepted beat that
 landed nothing.
 
-In `review` mode, or when the flag is a decision rather than a patch, record the reviewer's
-words in the beat's `call` field and advance. If the working tree is dirty, say so and stop
-rather than stashing. Never push and never open a PR unasked.
+In `review` mode, or when the flag is a decision rather than a patch, there is no commit
+to name, so post `decide` instead and let the server move the beat to `decided`:
+
+```bash
+curl -s -X POST $URL/act -H 'Content-Type: application/json' \
+  -d '{"n":5,"action":"decide","note":"stays as is, the cost lands on the caller"}'
+```
+
+Post it whether the beat is still an open flag or the reviewer already clicked Accept: the
+answer is the same, and `decided` is what says the answer was a call rather than a patch.
+Without it the beat sits `accepted` with nothing landed, which Phase 4 refuses to render
+clean and no legal edit can fix. The decision itself is the artifact, so a `decided` beat
+with no `call` fails validation the same way an accepted one with no `landed` does.
+
+If the working tree is dirty, say so and stop rather than stashing. Never push and never
+open a PR unasked.
 
 Infer what the reviewer wants from what they type. Do not make them learn a vocabulary: an
 observation becomes an anchored note, a question gets answered and the beat stays open,
@@ -328,15 +342,17 @@ serve.json       url and pid of the running server, removed when it exits
 report.html      rendered, regenerable, throwaway
 ```
 
-`state` is one of `clean`, `flag`, `unverified`, `accepted`, `dropped`. The first three
-are what a beat opens with; `accepted` and `dropped` are what a flag becomes after the
-reviewer answers. `slots` accepts only the six keys from rule 2. `diff` is a list of raw
+`state` is one of `clean`, `flag`, `unverified`, `accepted`, `dropped`, `decided`. The
+first three are what a beat opens with; the last three are what a flag becomes after the
+reviewer answers, `decided` being the yes that resolves in words rather than a commit.
+`slots` accepts only the six keys from rule 2. `diff` is a list of raw
 lines, classified on the first character. `lands[]` entries are
 `{state: landed|ready|open, what, where}`.
 
 `landed` names what an accepted beat became: a short SHA in `branch` mode, the review URL
 in `review` mode, with `branch` beside it when there is one. An accepted beat that names
-nothing does not render clean, because the reviewer said yes and nothing shows for it.
+nothing does not render clean, because the reviewer said yes and nothing shows for it. A
+`decided` beat never carries one; its `call` is what it became.
 
 These accumulate into a review history. When a later session touches the same paths, read
 the prior sessions for context.

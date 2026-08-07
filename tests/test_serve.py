@@ -124,6 +124,42 @@ class ResolvingAFlag(SessionTest):
         self.assertEqual(self.decisions()[0]["action"], "next")
 
 
+class Deciding(SessionTest):
+    """The yes that resolves in words rather than a commit. Without it the beat sat
+    accepted with nothing landed, which Phase 4 refuses to render clean, and the reviewer
+    was told to fix a beat file that had no legal fix."""
+
+    def test_it_resolves_an_open_flag(self):
+        self.session.act(1, "decide", "stays as is")
+        self.assertEqual(self.beat(1)["state"], "decided")
+        self.assertEqual(self.beat(1)["call"], "stays as is")
+
+    def test_it_also_takes_a_beat_the_reviewer_already_accepted(self):
+        """The click said yes. Deciding records that the yes was a call rather than a
+        patch, which is the same answer refined and not a second bite at it."""
+        self.session.act(1, "accept", "yes")
+        self.session.act(1, "decide", "")
+        self.assertEqual(self.beat(1)["state"], "decided")
+        self.assertEqual(self.beat(1)["call"], "yes")
+
+    def test_it_cannot_reopen_what_the_reviewer_dropped(self):
+        self.session.act(1, "drop", "no")
+        with self.assertRaises(ValueError):
+            self.session.act(1, "decide", "actually yes")
+        self.assertEqual(self.beat(1)["state"], "dropped")
+
+    def test_a_decided_beat_cannot_then_be_accepted(self):
+        self.session.act(1, "decide", "stays as is")
+        with self.assertRaises(ValueError):
+            self.session.act(1, "accept", "")
+        self.assertEqual(self.beat(1)["state"], "decided")
+
+    def test_a_clean_beat_was_never_a_flag_to_decide(self):
+        with self.assertRaises(ValueError):
+            self.session.act(2, "decide", "x")
+        self.assertEqual(self.beat(2)["state"], "clean")
+
+
 class Concurrency(SessionTest):
     def test_two_clients_cannot_resolve_one_flag_two_ways(self):
         """Read, guard and write used to sit outside the lock, so both passed the
@@ -515,6 +551,11 @@ class Requests(Served):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["seq"], 1)
         self.assertEqual(self.beat(1)["state"], "accepted")
+
+    def test_a_decide_over_http_resolves_the_flag(self):
+        status, _body = self.post("/act", {"n": 1, "action": "decide", "note": "as is"})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.beat(1)["state"], "decided")
 
     def test_a_content_length_that_is_not_a_number_answers_400(self):
         self.assertIn("400", self.raw(

@@ -126,6 +126,42 @@ class BeatValidation(unittest.TestCase):
                 self.assertEqual(rr.validate(beat(state=state, slots=slots)), [])
 
 
+class DecidedBeats(unittest.TestCase):
+    """The flag whose answer is a call rather than a patch. Accepting one used to demand
+    a `landed` value it could never have, so Phase 4 refused to render it clean and the
+    only fixes on offer were fabricating a SHA or overwriting the reviewer's state."""
+
+    def test_a_decided_beat_owes_no_commit(self):
+        self.assertEqual(rr.validate(beat(state="decided", call="stays as is")), [])
+
+    def test_a_decided_beat_with_nothing_recorded_is_not_shippable(self):
+        """The decision is the whole artifact, the way the SHA is for an accept."""
+        problems = rr.validate(beat(state="decided"))
+        self.assertIn("decided, nothing recorded", problems[0])
+
+    def test_a_decided_beat_that_landed_something_is_a_contradiction(self):
+        """If something shipped, it was accepted."""
+        problems = rr.validate(beat(state="decided", call="c", landed="961eb58"))
+        self.assertIn("landed 961eb58 but state is 'decided'", problems[0])
+
+    def test_an_accepted_beat_still_owes_one(self):
+        """The escape must not turn into a way around the rule it escapes."""
+        self.assertIn("accepted, nothing landed", rr.validate(beat(state="accepted"))[0])
+
+    def test_it_renders_among_the_beats_the_reviewer_said_yes_to(self):
+        html = rr.render(
+            {"repo": "r"}, [beat(n=1, state="decided", call="stays as is")], "", {})
+        self.assertIn("Accepted", html)
+        self.assertIn("DECIDED", html)
+        self.assertNotIn("Unplaced", html)
+
+    def test_the_decision_is_on_the_page_and_not_just_on_disk(self):
+        html = rr.render(
+            {"repo": "r"},
+            [beat(n=1, state="decided", call="the cost lands on the caller")], "", {})
+        self.assertIn("the cost lands on the caller", html)
+
+
 class ProofEvidence(unittest.TestCase):
     """PROOF has to name something a reader can re-run or open."""
 

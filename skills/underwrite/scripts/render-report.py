@@ -24,21 +24,24 @@ import sys
 from pathlib import Path
 
 SLOTS = ("what", "why", "proof", "risk", "prior", "fix")
-STATES = ("clean", "flag", "unverified", "accepted", "dropped")
+STATES = ("clean", "flag", "unverified", "accepted", "dropped", "decided")
 
 # state -> (css suffix, token shown before the claim)
+# `decided` borrows the accepted palette on purpose: the reviewer said yes to both, and
+# they sit in the same section, so the token is what separates them.
 STATE_STYLE = {
     "clean": ("clean", "CLEAN"),
     "flag": ("flag", "FLAG"),
     "unverified": ("unver", "UNVERIFIED"),
     "accepted": ("acc", "ACCEPTED"),
     "dropped": ("drop", "DROPPED"),
+    "decided": ("acc", "DECIDED"),
 }
 
 # (heading, hint, states, expanded by default)
 SECTIONS = (
     ("Needs your call", "out of beat order, on purpose", ("flag",), True),
-    ("Accepted", "your call, and whether it landed", ("accepted",), True),
+    ("Accepted", "your call, and what came of it", ("accepted", "decided"), True),
     ("Walked and clean", "nothing owed, proof on each", ("clean", "unverified"), False),
     ("Dropped", "raised, then set aside", ("dropped",), False),
 )
@@ -184,6 +187,11 @@ def validate(beat, mode="branch"):
     # rule would otherwise fire on every beat at the render that precedes the POST.
     if mode == "branch" and state == "accepted" and not beat.get("landed"):
         problems.append(f"beat {n}: accepted, nothing landed")
+    # The escape from that rule, for the flag whose answer is a call rather than a patch.
+    # Then the words are the whole artifact, and a decided beat with none of them is the
+    # same silence the rule above exists to catch.
+    if state == "decided" and not beat.get("call"):
+        problems.append(f"beat {n}: decided, nothing recorded")
     # The mirror, and the shape a decision taken in words leaves when it never reaches
     # the server: the fix committed, the beat still open, and the rule above looking
     # straight past it because it keys on the state that was never set.
