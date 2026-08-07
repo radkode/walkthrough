@@ -202,7 +202,10 @@ the reviewer acts:
 curl -s "$(python3 -c "import json;print(json.load(open('$R/serve.json'))['url'])")/await?after=<seq>"
 ```
 
-`<seq>` is the seq of the last action you handled, starting at 0. The reply is
+`<seq>` is the seq of the last action you handled. Start a new session at 0, and a
+resumed one at the `seq` that `GET /state` reports, because everything at or below it
+belongs to the previous sitting: `decisions.jsonl` outlives the server, so parking at 0
+on a resume hands you that sitting's first action back as though it were fresh. The reply is
 `{seq, n, action, note}` where action is `accept`, `drop`, `note`, `next`, `back`, or
 `skip`. A reply of `{"timeout": true}` means nobody acted; say so and park again. The
 terminal accepts the same answers in words, so a closed browser never strands the walk.
