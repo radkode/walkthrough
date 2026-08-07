@@ -458,6 +458,14 @@ h1 .num { color: var(--ink-3); font-variant-numeric: tabular-nums; }
 .live.working::before,
 .live.starting::before { animation: breathe 1.6s ease-in-out infinite; }
 
+/* Nobody is parked on /await. A filled dot reads as someone being there, so this one
+   is hollow and still: the controls stay live, because the call is recorded anyway. */
+.live.away { color: var(--unver); }
+.live.away::before {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px currentColor;
+}
+
 @keyframes breathe {
   50% { opacity: 0.25; }
 }
