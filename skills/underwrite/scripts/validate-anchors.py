@@ -41,7 +41,14 @@ def parse_diff(text):
     files, path, was = {}, None, None
     old_ln = new_ln = rem_old = rem_new = 0
 
-    for line in text.splitlines():
+    # Only \n ends a diff line. splitlines() also breaks on \r, \v, \f, \x1c-\x1e,
+    # \x85 and U+2028-9, any of which shatters a line whose content carries one.
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+
+    for line in lines:
+        line = line.rstrip("\r")
         # Inside a hunk, consume by the header's line counts. Counting rather than
         # pattern-matching keeps an added line of "++ x" from looking like a header.
         if rem_old > 0 or rem_new > 0:
@@ -153,19 +160,17 @@ def main():
     args = ap.parse_args()
 
     try:
+        # All three reads take bytes on purpose. Text mode translates a lone \r inside
+        # a line's content to \n, desyncing the hunk before parse_diff ever runs.
         if args.pr:
             diff = subprocess.run(
-                ["gh", "pr", "diff", args.pr],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                check=True,
-            ).stdout
+                ["gh", "pr", "diff", args.pr], capture_output=True, check=True
+            ).stdout.decode("utf-8")
         elif args.diff == "-":
             diff = sys.stdin.buffer.read().decode("utf-8")
         else:
-            with open(args.diff, encoding="utf-8") as fh:
-                diff = fh.read()
+            with open(args.diff, "rb") as fh:
+                diff = fh.read().decode("utf-8")
 
         with open(args.payload, encoding="utf-8") as fh:
             payload = json.load(fh)
