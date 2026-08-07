@@ -62,18 +62,25 @@ LIVE_JS = """<script>
 (() => {
   const live = document.getElementById('live');
   const body = document.getElementById('live-body');
-  let rev = null, known = new Set(), parked = false, sending = false;
+  let rev = null, known = new Set(), usable = false, sending = false;
 
   const beatIds = () => new Set([...document.querySelectorAll('.beat')].map(d => d.dataset.n));
   const openIds = () => new Set([...document.querySelectorAll('.beat[open]')].map(d => d.dataset.n));
 
-  // Controls are live only while the agent is parked. Acting mid-commit races it.
-  function applyStatus(status) {
+  // Acting mid-action races the walk, so the controls close while one is running. They
+  // stay open when no walk is listening: the call is appended either way, and a page
+  // that goes dead the moment nobody is home is how a session looks broken when it is
+  // only unattended.
+  function applyState(state) {
+    const status = state.status || {};
     const phase = status.phase || 'working';
-    parked = phase === 'parked';
-    live.className = 'live ' + phase;
-    live.textContent = status.text || phase;
-    if (!sending) enable(parked);
+    const listening = state.listening !== false;
+    usable = listening ? phase === 'parked' : true;
+    live.className = 'live ' + (listening ? phase : 'away');
+    live.textContent = listening
+      ? (status.text || phase)
+      : 'no walk is listening, your call is saved for whenever one returns';
+    if (!sending) enable(usable);
   }
 
   const enable = on => document.querySelectorAll('.act, .note')
@@ -88,7 +95,7 @@ LIVE_JS = """<script>
     });
     known = beatIds();
     wire();
-    enable(parked);
+    enable(usable);
   }
 
   async function act(button) {
@@ -123,7 +130,7 @@ LIVE_JS = """<script>
   const stream = new EventSource('./events');
   stream.onmessage = event => {
     const state = JSON.parse(event.data);
-    applyStatus(state.status || {});
+    applyState(state);
     if (rev !== null && state.rev !== rev) swap();
     rev = state.rev;
   };
