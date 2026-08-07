@@ -63,8 +63,12 @@ def rr():
             _renderer, _renderer_mtime = module, stamp
     return _renderer
 
-# accept and drop resolve an open flag; the rest steer the walk without changing state.
-RESOLVE = {"accept": "accepted", "drop": "dropped"}
+# These three resolve a flag; the rest steer the walk without changing state.
+RESOLVE = {"accept": "accepted", "drop": "dropped", "decide": "decided"}
+# What a beat has to be already. `decide` also takes an accepted one: an accept says yes,
+# and decide then records that the yes was a call rather than a patch, which refines the
+# same answer rather than taking a second bite at it.
+RESOLVABLE = {"accept": ("flag",), "drop": ("flag",), "decide": ("flag", "accepted")}
 ACTIONS = (*RESOLVE, "next", "note", "back", "skip")
 MAX_BODY = 64 * 1024
 AWAIT_TIMEOUT = 900.0
@@ -219,8 +223,11 @@ class Session:
                     raise ValueError(f"no beat {n}")
                 beat = json.loads(path.read_text(encoding="utf-8"))
                 if action in RESOLVE:
-                    if beat.get("state") != "flag":
-                        raise ValueError(f"beat {n} is {beat.get('state')}, not an open flag")
+                    if beat.get("state") not in RESOLVABLE[action]:
+                        raise ValueError(
+                            f"beat {n} is {beat.get('state')}, "
+                            f"which cannot become {RESOLVE[action]}"
+                        )
                     beat["state"] = RESOLVE[action]
                 if note:
                     beat["call"] = note
